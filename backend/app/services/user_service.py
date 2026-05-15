@@ -3,6 +3,11 @@ from sqlalchemy.orm import Session
 from app.core.security import get_password_hash, verify_password
 from app.models.user import User
 from app.schemas.user import UserCreate
+from app.models.organization import OrganizationRole
+from app.services.organization_service import (
+    add_user_to_organization,
+    create_organization,
+)
 
 
 def get_user_by_email(
@@ -34,12 +39,24 @@ def create_user(
     )
 
     db.add(user)
+    db.flush()
+
+    organization = create_organization(
+        db,
+        name=user_in.organization_name,
+    )
+
+    add_user_to_organization(
+        db,
+        user_id=user.id,
+        organization_id=organization.id,
+        role=OrganizationRole.OWNER,
+    )
+
     db.commit()
     db.refresh(user)
 
     return user
-
-
 def authenticate_user(
     db: Session,
     email: str,

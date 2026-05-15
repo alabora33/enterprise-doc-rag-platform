@@ -1140,3 +1140,431 @@ ROUTER HİYERARŞİSİ:
 
 ========================================================
 
+========================================================
+COMMIT: "Add JWT authentication endpoints" — ORGANİZASYON
+VE KULLANICI ROL KATMANININ EKLENMESİ
+========================================================
+
+Bu commit ile sistemin multi-tenant (çok kiracılı) iskelet yapısı
+kuruldu. Her kullanıcı kayıt olduğunda otomatik bir organizasyon
+oluşturulur ve kullanıcı o organizasyonun OWNER'ı olur.
+
+Etkilenen dosyalar (migration hariç):
+  GÜNCELLEME : models/user.py
+  GÜNCELLEME : models/__init__.py
+  GÜNCELLEME : schemas/user.py
+  GÜNCELLEME : services/user_service.py
+  GÜNCELLEME : api/v1/router.py
+  YENİ       : models/organization.py
+  YENİ       : schemas/organization.py
+  YENİ       : services/organization_service.py
+  YENİ       : api/v1/organizations.py
+
+========================================================
+MODELS/ORGANIZATION.PY — ORGANİZASYON MODELLERİ
+========================================================
+
+## NEDEN BU DOSYA OLUŞTURULDU?
+Platform multi-tenant: farklı şirketler (organizasyonlar) sistemi
+kullanır. Her kullanıcının her organizasyonda farklı yetkisi olabilir.
+Bu ilişkiyi üç ayrı yapıyla çözdük: OrganizationRole, Organization,
+UserOrganizationRole.
+
+## OrganizationRole(str, Enum)
+
+class OrganizationRole(str, Enum):
+    OWNER  = "owner"
+    ADMIN  = "admin"
+    MEMBER = "member"
+    VIEWER = "viewer"
+
+  str, Enum kombinasyonu neden?
+  → str : DB'ye string olarak yazılır, JSON'a string olarak serialize
+          edilir, karşılaştırma kolaylaşır ("owner" == OrganizationRole.OWNER)
+  → Enum: geçersiz değer atanması önlenir, IDE autocomplete çalışır
+  → plain str kullansaydık "ownr" gibi typo'lar runtime'a kadar fark
+    edilmezdi
+
+  Roller neden 4 tane?
+  → OWNER  : organizasyonu kuran, siler, her şeye erişir
+  → ADMIN  : üye ekler/çıkarır, ayarları değiştirir
+  → MEMBER : doküman yükler, chat yapar
+  → VIEWER : sadece okur, chat yapamaz
+  İleride yetki kontrolü bu rollere göre yapılacak.
+
+## Organization(Base)
+
+__tablename__ = "organizations"
+
+  id: Mapped[int] — primary_key=True, index=True
+    → Her organizasyonun benzersiz kimliği
+    → index → WHERE id=? sorguları hızlı
+
+  name: Mapped[str] — String(255), nullable=False, index=True
+    → Organizasyon adı zorunlu
+    → index=True → isme göre arama yapılacak (admin panel, autocomplete)
+
+  created_at / updated_at: DateTime, default=datetime.utcnow
+    → Audit trail: ne zaman kuruldu, ne zaman değişti
+
+  members = relationship("UserOrganizationRole",
+                          back_populates="organization",
+                          cascade="all, delete-orphan")
+    → organization.members diyerek tüm üye kayıtlarına erişilir
+    → cascade="all, delete-orphan": organizasyon silinince DB'de
+      o organizasyona ait tüm UserOrganizationRole satırları da
+      otomatik silinir, orphan (sahipsiz) kayıt kalmaz
+
+## UserOrganizationRole(Base)
+
+Kullanıcı ile Organizasyon arasındaki M:N (many-to-many) ilişkiyi
+çözen junction (ara) tablo. Her satır "şu kullanıcı şu rolde şu
+organizasyona üye" anlamına gelir.
+
+__tablename__ = "user_organization_roles"
+
+  __table_args__ = (UniqueConstraint("user_id", "organization_id",
+                                      name="uq_user_organization"),)
+    → Bir kullanıcı aynı organizasyona iki kez eklenemez.
+    → DB seviyesinde kısıt — uygulama katmanı bypass edilse bile
+      DB reddeder.
+
+  user_id: ForeignKey("users.id", ondelete="CASCADE")
+    → users tablosuna FK bağı
+    → ondelete="CASCADE": kullanıcı silinince bu satırlar da silinir
+
+  organization_id: ForeignKey("organizations.id", ondelete="CASCADE")
+    → organizations tablosuna FK bağı
+    → ondelete="CASCADE": organizasyon silinince bu satırlar da silinir
+
+  role: Mapped[str] — String(50), default=OrganizationRole.MEMBER.value
+    → Rolü string olarak saklar (enum.value: "member" gibi)
+    → default=MEMBER: belirtilmezse üye olur, admin/owner elle verilmeli
+
+  created_at: DateTime, default=datetime.utcnow
+    → Ne zaman eklendi — raporlama ve audit için
+
+  organization = relationship("Organization", back_populates="members")
+    → user_role.organization diyerek Organization nesnesine ulaşılır
+    → GET /organizations/me endpoint'inde nested response için kullanılır
+
+  NOT: User modeline back_populates eklenmedi.
+    → Fonksiyonel sorun yok ama ileride user_role.user erişimi
+      gerekirse User modeline de relationship eklenmeli.
+
+========================================================
+MODELS/USER.PY — GÜNCELLEME: organization_roles EKLENDI
+========================================================
+
+Değişen tek satır:
+
+  organization_roles = relationship(
+      "UserOrganizationRole",
+      cascade="all, delete-orphan",
+  )
+
+  Neden eklendi?
+    → user.organization_roles diyerek kullanıcının tüm
+      organizasyon üyeliklerini ORM üzerinden çekmek için
+
+  cascade="all, delete-orphan"
+    → Kullanıcı silinince o kullanıcıya ait tüm
+      UserOrganizationRole satırları da silinir
+    → DB'deki ondelete="CASCADE" ile çift güvence
+
+  back_populates neden yok?
+    → UserOrganizationRole'de "user" adlı back relationship
+      henüz tanımlanmadı. Tek yönlü. Eklenmesine gerek
+      duyulduğunda iki tarafa da eklenecek.
+
+========================================================
+MODELS/__INIT__.PY — GÜNCELLEME
+========================================================
+
+Önceki hal:
+  from app.models.user import User
+  __all__ = ["User"]
+
+Yeni hal:
+  from app.models.user import User
+  from app.models.organization import Organization, UserOrganizationRole
+  __all__ = ["User", "Organization", "UserOrganizationRole"]
+
+  Neden eklendi?
+    → Alembic autogenerate çalışırken Base.metadata'yı tarar.
+      Bir model hiçbir yerden import edilmemişse metadata'ya
+      dahil olmaz, migration oluşturulamaz.
+    → Yeni modeller buraya eklendikçe Alembic hepsini görür.
+
+========================================================
+SCHEMAS/ORGANIZATION.PY — ORGANİZASYON ŞEMALARI
+========================================================
+
+## OrganizationCreate
+POST ile organizasyon oluşturma isteğinde kullanılır.
+
+  name: str = Field(min_length=2, max_length=255)
+    → min_length=2 : tek harflik isimleri reddeder
+    → max_length=255: DB kolonuyla uyumlu, aşılamaz
+
+## OrganizationRead
+Organizasyon bilgilerini API'den dönerken kullanılır.
+
+  id, name, created_at
+  model_config = {"from_attributes": True}
+    → ORM nesnesi doğrudan serialize edilebilir
+
+  Neden updated_at yok?
+    → API kullanıcısı için gerekli değil, sadece internal.
+      İleride admin endpoint'inde eklenebilir.
+
+## UserOrganizationRead
+GET /organizations/me endpoint'inin response şeması.
+Kullanıcının üye olduğu her organizasyon + rolu döner.
+
+  organization: OrganizationRead
+    → İç içe nested schema. UserOrganizationRole ORM nesnesi
+      üzerinden organization relationship'i otomatik serialize edilir.
+
+  role: str
+    → "owner", "admin", "member", "viewer" değerlerinden biri
+
+  model_config = {"from_attributes": True}
+    → Nested relationship'lerin ORM'den okunabilmesi için zorunlu.
+      Bu olmadan organization alanı serialize edilemez.
+
+  Örnek response:
+    [
+      {
+        "organization": {"id": 1, "name": "Acme Corp", "created_at": "..."},
+        "role": "owner"
+      }
+    ]
+
+========================================================
+SCHEMAS/USER.PY — GÜNCELLEME: organization_name EKLENDI
+========================================================
+
+UserCreate'e yeni alan:
+
+  organization_name: str = Field(min_length=2, max_length=255)
+
+  Neden kayıt formunda organizasyon adı isteniyor?
+    → Multi-tenant sistemde her kullanıcı bir organizasyona ait olmalı.
+      Kullanıcı kayıt olunca aynı anda organizasyon da oluşturulur.
+    → Alternatif tasarım: önce kayıt ol, sonra organizasyon kur.
+      Bu tasarımda kullanıcı oluşturma ve organizasyon kurma atomik
+      (ya hepsi ya hiçbiri) olduğu için tek formda toplandı.
+
+  max_length=255 neden?
+    → DB kolonuyla (String(255)) birebir uyumlu.
+      DB'de 255 olan alana 300 karakter gönderilirse Pydantic
+      API katmanında reddeder, DB'ye kadar gitmez.
+
+  Önceki password max_length değişikliği de bu commit'te:
+    password: str = Field(min_length=6, max_length=72)
+      → Önceki max 128'di, 72'ye indirildi.
+      → Neden 72? bcrypt iç yapısı gereği 72 byte'tan uzun giriş
+        kırpılır. 73. karakter ve sonrası bcrypt tarafından yok
+        sayılır. max_length=72 bu davranışla bilinçli hizalandı.
+
+========================================================
+SERVICES/ORGANIZATION_SERVICE.PY — YENİ DOSYA
+========================================================
+
+## NEDEN AYRI BİR SERVICE?
+Organization iş mantığı user_service.py'a gömülseydi:
+  - Organizasyon işlemleri başka endpoint'lerden çağırılamaz
+  - Test edilmesi zorlaşır
+  - user_service.py şişer
+
+Ayrı dosyada: her servis tek bir domain'den sorumlu.
+
+## create_organization(db, name) → Organization
+
+  organization = Organization(name=name)
+  db.add(organization)
+  db.flush()
+  return organization
+
+  db.flush() — neden commit değil?
+    → Flush: değişikliği SQL'e çevirir ama transaction'ı kapatmaz.
+    → Bu fonksiyon transaction yönetmez, çağıran yönetir.
+    → user_service.create_user() hem user hem org hem rolü tek bir
+      db.commit() ile atomik kaydeder. flush sayesinde org.id alınır
+      ama henüz DB'ye yazılmaz. Hata olursa ikisi de geri alınır.
+
+## add_user_to_organization(db, user_id, organization_id, role) → UserOrganizationRole
+
+  user_role = UserOrganizationRole(
+      user_id=user_id,
+      organization_id=organization_id,
+      role=role.value,   ← enum değil string: "owner", "member"...
+  )
+  db.add(user_role)
+  db.flush()
+  return user_role
+
+  role=OrganizationRole.MEMBER default olarak
+    → Belirtilmezse üye olur. Şu an yalnızca OWNER ile çağrılıyor
+      ama gelecekte davet sistemi MEMBER ile çağıracak.
+
+  role.value neden?
+    → DB kolonu String(50), Enum objesi değil string bekler.
+      role.value → "owner", "admin" gibi string döner.
+
+## get_user_organizations(db, user_id) → list[UserOrganizationRole]
+
+  db.query(UserOrganizationRole)
+    .filter(UserOrganizationRole.user_id == user_id)
+    .all()
+
+  → GET /organizations/me endpoint'inin tek sorgusu.
+  → ORM üzerinden organization relationship'i lazy load olarak
+    çekilir. UserOrganizationRead serialize ederken otomatik JOIN.
+
+========================================================
+SERVICES/USER_SERVICE.PY — GÜNCELLEME
+========================================================
+
+## create_user() İÇİNDEKİ DEĞİŞİKLİKLER
+
+Önceki hal:
+  db.add(user)
+  db.commit()
+  db.refresh(user)
+
+Yeni hal:
+  db.add(user)
+  db.flush()          ← commit yerine flush
+
+  organization = create_organization(db, name=user_in.organization_name)
+  add_user_to_organization(
+      db,
+      user_id=user.id,
+      organization_id=organization.id,
+      role=OrganizationRole.OWNER,
+  )
+
+  db.commit()         ← tek commit, her şeyi kapsar
+  db.refresh(user)
+
+  Neden flush → commit değil commit → commit?
+
+  db.flush() sonrası:
+    → user.id artık None değil (DB sequence ID üretildi)
+    → Ama transaction hala açık, henüz commit edilmedi
+
+  Atomicity:
+    → Kullanıcı oluştu ama organizasyon oluşturma başarısız olduysa
+      her iki kayıt da geri alınır.
+    → Yarım kullanıcı (organizasyonsuz) DB'de KALMAZ.
+    → İki ayrı commit kullansaydık: user commit'lendi, org exception
+      fırlattı → DB'de organizasyonsuz kullanıcı kalırdı. Hatalı durum.
+
+  Yeni import'lar eklendi:
+    from app.models.organization import OrganizationRole
+    from app.services.organization_service import (
+        add_user_to_organization,
+        create_organization,
+    )
+
+## authenticate_user() — HATIRLATMA (bu commit'te yazıldı)
+
+  Önceki notlarda detaylandırıldı. Kısa özet:
+  → Email + şifre doğrulama. User veya None döner.
+  → "email yok" ve "şifre yanlış" ayırt edilmez.
+    User Enumeration saldırısını önlemek için.
+
+========================================================
+API/V1/ORGANIZATIONS.PY — YENİ ENDPOINT
+========================================================
+
+## GET /organizations/me
+
+router = APIRouter(prefix="/organizations", tags=["Organizations"])
+
+@router.get("/me", response_model=list[UserOrganizationRead])
+def read_my_organizations(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    return get_user_organizations(db, user_id=current_user.id)
+
+  response_model=list[UserOrganizationRead]
+    → Birden fazla organizasyon üyeliği olabilir, liste döner.
+    → Her eleman: organizasyon bilgisi + rol.
+
+  Depends(get_current_user)
+    → users.py'deki dependency kullanılır.
+    → Token doğrulama bu endpoint'e tek satır eklenerek sağlandı.
+    → Dependency yeniden kullanımının avantajı burada görülür.
+
+  Neden current_user'ı parametre olarak almak daha iyi?
+    → Endpoint içinde token parse etmek, DB sorgusu çekmek
+      gibi işler tekrarlanmaz.
+    → Test ederken current_user mock'lanabilir.
+
+  OLUŞAN URL: /api/v1/organizations/me
+
+========================================================
+API/V1/ROUTER.PY — GÜNCELLEME
+========================================================
+
+Önceki hal:
+  from app.api.v1 import auth, users
+  api_router.include_router(auth.router)
+  api_router.include_router(users.router)
+
+Yeni hal:
+  from app.api.v1 import auth, users, organizations
+  api_router.include_router(auth.router)
+  api_router.include_router(users.router)
+  api_router.include_router(organizations.router)
+
+  Neden sadece bu iki satır?
+    → organizations.router kendi prefix'ini (/organizations)
+      kendi dosyasında tanımlıyor. Router burada sadece birleştiriliyor.
+
+GÜNCEL URL TABLOSu:
+  /api/v1/auth/register          → POST
+  /api/v1/auth/login             → POST
+  /api/v1/users/me               → GET (token gerekli)
+  /api/v1/organizations/me       → GET (token gerekli)
+
+========================================================
+BU KOMMİTİN BÜYÜK RESMİ — TÜM AKIŞ
+========================================================
+
+KAYIT (POST /auth/register):
+  UserCreate (email, password, organization_name)
+      ↓
+  Email kayıtlı mı? → 400
+      ↓
+  create_user()
+    ├── get_password_hash()       → bcrypt hash
+    ├── User ORM nesnesi oluştur
+    ├── db.flush()                → user.id alındı, henüz commit yok
+    ├── create_organization()     → db.flush()
+    ├── add_user_to_organization(role=OWNER) → db.flush()
+    └── db.commit()               → üçü birden tek transaction
+      ↓
+  UserRead filtrele → 201
+
+GİRİŞ (POST /auth/login):
+  authenticate_user() → user.id
+      ↓
+  create_access_token(user.id) → JWT
+      ↓
+  Token → {"access_token": "...", "token_type": "bearer"}
+
+KENDİ ORGANİZASYONLARIM (GET /organizations/me):
+  Authorization: Bearer <token>
+      ↓
+  get_current_user() → token doğrula → User nesnesi
+      ↓
+  get_user_organizations(user_id)
+      ↓
+  list[UserOrganizationRead] → nested JSON response
+
+========================================================
