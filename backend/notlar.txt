@@ -1,0 +1,1142 @@
+========================================================
+KURUMSAL DOKÜMAN RAG PLATFORMU — PROJE NOTLARI
+========================================================
+
+## PROJE FİKRİ
+Şirketler PDF, Word, Excel, sözleşme, teknik doküman, prosedür,
+yönetmelik yüklesin. Sistem bu dokümanları okusun ve kullanıcı
+sorularına kaynaklı cevap versin.
+
+Örnek:
+  Kullanıcı : Bu sözleşmede fesih şartları nelerdir?
+  Sistem     : Madde 8.2'ye göre taraflar 30 gün önceden yazılı
+               bildirimle... | Kaynak: contract.pdf, sayfa 12
+
+========================================================
+KULLANILAN TEKNOLOJİLER
+========================================================
+
+Backend   : FastAPI, PostgreSQL, SQLAlchemy, Redis, Celery, Docker
+AI        : OpenAI API veya local LLM, LangChain/LlamaIndex,
+            Qdrant veya pgVector, Embedding model, RAG pipeline
+Dosya     : PDF parser, DOCX parser, Excel reader, OCR (opsiyonel)
+Frontend  : React veya basit admin panel
+
+========================================================
+MODÜLLER
+========================================================
+- Kullanıcı kayıt/giriş
+- Şirket/organizasyon yapısı
+- Dosya yükleme
+- Doküman işleme kuyruğu
+- Chunk oluşturma
+- Embedding çıkarma
+- Vector DB kaydı
+- Chat ekranı + kaynak gösterme
+- Token kullanım takibi
+- Admin panel
+
+========================================================
+MİMARİ NEDEN BÖYLE KURULDU? (config.py bağlamı)
+========================================================
+
+1. pydantic-settings + BaseSettings kullanımı
+   - Tüm hassas bilgiler (DB şifreleri, API key, JWT secret)
+     kod içine gömülmeden .env dosyasından okunur.
+   - Tip güvenliği: "8080" string'i otomatik int'e dönüşür,
+     eksik zorunlu alan varsa uygulama hiç başlamaz.
+   - Singleton pattern: settings nesnesi bir kez oluşturulur,
+     projenin her yerinden aynı nesneye erişilir.
+
+2. Neden bu alanlar var?
+   - DATABASE_URL  : PostgreSQL bağlantısı (SQLAlchemy için)
+   - REDIS_URL     : Celery broker + cache (kuyruk sistemi)
+   - JWT_SECRET_KEY: Kullanıcı oturum token'larını imzalar
+   - OPENAI_API_KEY: RAG pipeline'da LLM çağrısı için (opsiyonel,
+                     local LLM kullanılacaksa boş bırakılabilir)
+   - APP_ENV       : development/production ayrımı için
+
+3. extra="ignore" neden var?
+   - .env dosyasında olup sınıfta tanımlanmayan değişkenler
+     hata vermeden geçilir. Ortam genişledikçe esneklik sağlar.
+
+4. Genel mimari mantığı
+   - FastAPI  : Async HTTP API katmanı
+   - Celery   : Doküman işleme ağır iş yüklerini arka plana atar
+                (PDF parse, embedding çıkarma vs.)
+   - Redis    : Celery'nin mesaj kuyruğu + oturum cache'i
+   - pgVector : Embedding'leri PostgreSQL içinde saklar,
+                Qdrant ise ayrı vector DB olarak kullanılabilir
+   - RAG akışı: Yüklenen dosya → chunk → embedding → vector DB
+                Soru gelince → embedding → benzer chunk bul
+                → LLM'e context ile gönder → kaynaklı cevap dön
+
+========================================================
+
+========================================================
+SESSION.PY — VERİTABANI OTURUM YÖNETİMİ
+========================================================
+
+## NE YAPAR?
+PostgreSQL bağlantısını yönetir. SQLAlchemy engine'i oluşturur,
+session factory tanımlar ve FastAPI endpoint'lerine DB session'ı
+Dependency Injection ile sağlar.
+
+## SATIR SATIR
+- create_engine(DATABASE_URL, pool_pre_ping=True)
+    Bağlantı havuzu oluşturur. pool_pre_ping ölü bağlantıları
+    kullanmadan önce test eder (production'da kritik).
+
+- SessionLocal = sessionmaker(autocommit=False, autoflush=False)
+    autocommit=False → manuel commit gerekir, hata olursa rollback
+    autoflush=False  → sorgu öncesi otomatik flush yok (performans)
+
+- get_db() generator fonksiyonu
+    FastAPI Depends() ile kullanılır. yield ile session endpoint'e
+    verilir, istek bitince (hata olsa bile) finally ile kapatılır.
+    Bağlantı sızıntısı olmaz.
+
+========================================================
+SQLALCHEMY NEDEN KULLANILDI?
+========================================================
+
+TEMEL AVANTAJLAR
+- ORM: Tablolar Python sınıfı, satırlar Python nesnesi olur
+- SQL Injection koruması: Parametreler otomatik escape edilir
+- DB bağımsızlığı: PostgreSQL/MySQL/SQLite aynı kodla çalışır
+- Relationship yönetimi: JOIN yazmak yerine user.documents gibi
+- Connection pool: Her request için yeni bağlantı açılmaz
+- Alembic entegrasyonu: Model değişince migration otomatik üretilir
+
+BU PROJEDE NEDEN GEREKLİ?
+- Kullanıcı / şirket / doküman ilişkileri → relationship
+- Doküman işleme durumu takibi → güvenli transaction
+- Token kullanım takibi → atomic sayaç güncellemeleri
+- Celery worker'lar DB yazıyor → her worker'da ayrı session
+- Şema değişiklikleri → alembic revision --autogenerate
+
+NEDEN ALTERNATİFLER SEÇİLMEDİ?
+- psycopg2   : Çok düşük seviye, her şey elle
+- Tortoise   : Async-only, ekosistemi küçük
+- SQLModel   : Henüz olgunlaşmamış
+- SQLAlchemy : Endüstri standardı, en geniş ekosistem, battle-tested
+
+
+
+========================================================
+SESSIONLOCAL — autocommit=False ve autoflush=False
+========================================================
+
+## autocommit=False — Neden?
+
+Veritabanında her işlem bir "transaction" içinde gerçekleşir.
+autocommit=True olsaydı her SQL cümlesi anında DB'ye yazılırdı,
+geri alınamaz ve hata yönetimi imkansız olurdu.
+
+autocommit=False ile:
+  - Değişiklikler db.commit() çağrılana kadar DB'ye yazılmaz
+  - Hata olursa db.rollback() ile her şey geri alınır
+  - Birden fazla işlem atomik yapılabilir (ya hepsi ya hiçbiri)
+
+Örnek senaryo — doküman yükleme:
+  1. Dosya kaydı DB'ye eklendi
+  2. Celery kuyruğuna görev eklendi
+  3. Kullanım sayacı güncellendi
+  → 2. adımda hata olursa commit yapılmaz,
+    yarım kayıt DB'de kalmaz, rollback ile temizlenir.
+
+## autoflush=False — Neden?
+
+flush = session belleğindeki değişiklikleri SQL'e çevirmek
+        (ama henüz commit etmemek)
+
+autoflush=True olsaydı her db.query() çağrısından önce
+SQLAlchemy otomatik flush yapardı. Bu:
+  - Beklenmedik DB yazımlarına yol açar
+  - Henüz hazır olmayan veriyi DB'ye gönderebilir
+  - Özellikle Celery worker'lar ve karmaşık işlemlerde
+    sıra dışı davranışlara neden olur
+
+autoflush=False ile:
+  - Flush kontrolü tamamen geliştiricinin elinde
+  - İstersen db.flush() ile erken flush yapabilirsin
+  - Performans: gereksiz SQL round-trip olmaz
+
+## ÖZET
+
+  autocommit=False + autoflush=False = maksimum kontrol
+  Kurumsal projede veri tutarlılığı performanstan önce gelir.
+  RAG pipeline'da doküman → chunk → embedding → vector DB
+  zinciri gibi çok adımlı işlemlerde bu kontrol hayati.
+
+========================================================
+========================================================
+BASE.PY — TÜM MODELLERİN ATA SINIFI
+========================================================
+
+from sqlalchemy.orm import DeclarativeBase
+
+class Base(DeclarativeBase):
+    pass
+
+- SQLAlchemy 2.0'ın modern ORM sistemi.
+  Eski declarative_base() fonksiyonunun yerini aldı.
+- Tüm modeller bu sınıftan kalıtım alır (User(Base) gibi).
+- pass: şu an ekstra davranış gerekmiyor, saf temel sınıf.
+
+NEDEN AYRI DOSYA?
+- Alembic migration'ları için tüm modellerin aynı Base'den
+  türemesi zorunlu. Base olmadan migration çalışmaz.
+- Circular import önlenir: modeller base.py'ı import eder,
+  session.py modelleri import etmez.
+
+========================================================
+USER.PY — KULLANICI MODELİ (users tablosu)
+========================================================
+
+__tablename__ = "users"
+  → PostgreSQL'deki tablo adı
+
+id: Mapped[int] — primary_key=True, index=True
+  → Her satırın benzersiz kimliği. index ile WHERE id=X hızlı.
+  → Mapped[int]: Python tip sistemi bilir, IDE autocomplete çalışır.
+
+email: Mapped[str] — unique=True, index=True, nullable=False
+  → Aynı email iki kez kayıt olamaz (unique).
+  → Login sorgularında hız için index.
+  → String(255): sınırsız bırakmak yerine alan kısıtı.
+
+full_name: Mapped[str | None] — nullable=True
+  → Opsiyonel alan. Python'da None, DB'de NULL olabilir.
+
+hashed_password: Mapped[str] — nullable=False
+  → Plain text şifre ASLA saklanmaz.
+  → bcrypt/argon2 ile hash'lenmiş hali tutulur.
+  → Alan adı da bunu açıkça belirtir (güvenlik prensibi).
+
+is_active: Mapped[bool] — default=True
+  → Soft delete mantığı: kullanıcı silme yerine is_active=False.
+  → Kayıt DB'den silinmez, audit trail korunur.
+
+is_superuser: Mapped[bool] — default=False
+  → Admin panel ve yetkilendirme için.
+  → Yeni kullanıcılar varsayılan False — güvenlik gereği.
+
+created_at: Mapped[datetime] — default=datetime.utcnow
+  → Kayıt ilk oluşturulduğunda bir kez set edilir.
+
+updated_at: Mapped[datetime] — onupdate=datetime.utcnow
+  → Her güncellemede otomatik değişir.
+  → UTC kullanımı: tüm sunucular aynı zaman diliminde çalışır.
+
+========================================================
+MODELS/__INIT__.PY — MODEL DIŞA AÇMA
+========================================================
+
+from app.models.user import User
+__all__ = ["User"]
+
+- "from app.models import User" şeklinde kısa import imkanı sağlar.
+- __all__: bu modülden * ile import edilince sadece User çıkar,
+  iç detaylar gizli kalır.
+- Alembic modelleri keşfedebilmek için bir yerden import
+  edilmesini bekler. Bu dosya o işi yapar.
+
+========================================================
+MİMARİ BAĞLANTI — DOSYALAR ARASI İLİŞKİ
+========================================================
+
+base.py       →  Base sınıfı (tüm modellerin atası)
+    ↓
+user.py       →  User(Base) — "users" tablosunu tanımlar
+    ↓
+__init__.py   →  Modelleri dışa açar, Alembic keşfeder
+    ↓
+alembic/      →  Base.metadata'ya bakarak migration üretir
+    ↓
+session.py    →  Engine + SessionLocal ile DB'ye bağlanır
+
+========================================================
+========================================================
+ALEMBİC — VERİTABANI MİGRATION YÖNETİMİ
+========================================================
+
+## NEDİR?
+SQLAlchemy modellerini okuyarak veritabanı şema değişikliklerini
+otomatik üreten, versiyonlayan ve uygulayan araç.
+Django'daki makemigrations/migrate ikilisinin SQLAlchemy karşılığı.
+
+## NEDEN KULLANDIK?
+Ham SQL ile şema yönetmek kaosa yol açar:
+  - Hangi sunucuda hangi ALTER TABLE çalıştırıldı?
+  - Takım arkadaşı bu değişikliği aldı mı?
+  - Hata olursa geri alınabilir mi?
+Alembic tüm bunları çözer.
+
+AVANTAJLAR
+- Migration dosyaları Git'e eklenir → takım senkron kalır
+- Her migration versiyonlanır → DB'nin hangi versiyonda
+  olduğu alembic_version tablosunda tutulur
+- --autogenerate: model değişince SQL'i sen yazmıyorsun
+- upgrade/downgrade: ileri ve geri alınabilir
+- Üretime güvenle deploy edilebilir
+
+========================================================
+YAPILAN YAPILANDIRMALAR VE NEDENLERİ
+========================================================
+
+## 1. alembic.ini — sqlalchemy.url değiştirildi
+
+  Eskisi : sqlalchemy.url = driver://user:pass@localhost/dbname
+  Yenisi : sqlalchemy.url = postgresql://rag_user:rag_password@localhost:5432/rag_db
+
+  Alembic DB'ye bağlanmak için bu URL'i kullanır.
+  localhost kullanıldı çünkü alembic komutu Windows
+  terminalinden (Docker dışından) çalıştırılıyor.
+  Docker container içinden çalışsaydı "db" yazılacaktı.
+
+## 2. alembic/env.py — iki kritik ekleme yapıldı
+
+  EKLEME 1 — Model import'ları:
+    from app.db.base import Base
+    from app.models import User
+
+    Alembic modelleri görebilmek için bunları import etmek
+    zorunda. Import edilmeden Base.metadata boş kalır,
+    autogenerate hiçbir tablo üretemez.
+
+  EKLEME 2 — target_metadata:
+    Eskisi : target_metadata = None
+    Yenisi : target_metadata = Base.metadata
+
+    Base.metadata tüm model tanımlarını içerir. Alembic buna
+    bakarak "DB'de ne olmalı?" sorusunu yanıtlar ve mevcut
+    DB şemasıyla farkı bulur, migration'ı otomatik yazar.
+
+========================================================
+TEMEL ALEMBİC KOMUTLARI
+========================================================
+
+Migration oluştur (otomatik):
+  alembic revision --autogenerate -m "create users table"
+  → app/models içindeki modellere bakarak SQL üretir
+  → alembic/versions/xxxx_create_users_table.py dosyası oluşur
+
+Migration'ı uygula:
+  alembic upgrade head
+  → "head" = en son migration versiyonu
+  → SQL PostgreSQL'e uygulanır, tablo fiziksel olarak oluşur
+  → alembic_version tablosuna versiyon ID yazılır
+
+Geri al:
+  alembic downgrade -1   → bir adım geri
+  alembic downgrade base → en başa dön
+
+Mevcut durumu gör:
+  alembic current        → DB hangi versiyonda?
+  alembic history        → tüm migration geçmişi
+
+========================================================
+PROJEDEKİ YERİ — BÜYÜK RESİM
+========================================================
+
+Yeni model eklendi (Document, Chunk, Organization...)
+        ↓
+alembic revision --autogenerate -m "add documents table"
+        ↓
+alembic/versions/ içinde yeni dosya oluştu
+        ↓
+alembic upgrade head
+        ↓
+PostgreSQL şeması güncellendi
+        ↓
+Git'e commit → takım pull → aynı komutu çalıştırır → senkron
+
+İleride eklenecek tablolar: Document, Chunk, Embedding,
+Organization, TokenUsage — hepsi Alembic ile yönetilecek.
+
+========================================================
+
+========================================================
+SECURITY.PY — ŞİFRE VE JWT TOKEN YÖNETİMİ
+========================================================
+
+## GENEL AMAÇ
+Kullanıcı kimlik doğrulamasının iki temel parçasını yönetir:
+  1. Şifre hash'leme ve doğrulama (bcrypt)
+  2. JWT token üretme ve çözme (python-jose)
+
+========================================================
+KÜTÜPHANELER
+========================================================
+
+passlib + bcrypt:
+  - Şifre hash'lemek için kullanılır
+  - bcrypt kasıtlı olarak YAVAŞ çalışır → brute-force zorlaşır
+  - MD5/SHA gibi hızlı algoritmalar şifre için tehlikelidir
+
+python-jose:
+  - JWT (JSON Web Token) üretmek ve doğrulamak için
+  - JWT: kullanıcı kimliğini şifreli ve imzalı taşıyan string
+  - Sunucu session tutmaz, token her istekte doğrulanır
+
+========================================================
+ŞİFRE YÖNETİMİ
+========================================================
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+  - bcrypt algoritmasını aktif eder
+  - deprecated="auto": ileride algoritma değişirse eski
+    hash'ler otomatik işaretlenir, sistem bozulmaz
+
+verify_password(plain_password, hashed_password) → bool
+  - Login sırasında kullanılır
+  - Kullanıcının girdiği şifreyi DB'deki hash ile karşılaştırır
+  - Plain text asla DB'de tutulmaz, karşılaştırma hash üzerinden
+
+get_password_hash(password) → str
+  - Kayıt sırasında kullanılır
+  - Şifreyi bcrypt ile hash'ler
+  - Her çağrıda farklı SALT üretilir → aynı şifre her seferinde
+    farklı hash verir → rainbow table saldırısı engellenir
+
+========================================================
+JWT TOKEN ÜRETİMİ — create_access_token
+========================================================
+
+subject: str | int
+  - Genellikle user.id — token kimin için üretildi
+
+expires_delta: timedelta | None
+  - Özel süre belirlenebilir, belirtilmezse config'deki
+    ACCESS_TOKEN_EXPIRE_MINUTES (60 dk) kullanılır
+
+datetime.now(timezone.utc)
+  - Timezone-aware UTC zamanı kullanılır
+  - Sunucunun lokal saatinden bağımsız
+  - Farklı ülkelerdeki sunucularda tutarsızlık olmaz
+
+JWT Payload (to_encode):
+  "exp" → token'ın biteceği zaman (RFC 7519 standardı)
+          kütüphane bunu otomatik kontrol eder
+  "sub" → token sahibinin kimliği (user id string olarak)
+
+jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+  - Payload secret key ile İMZALANIR
+  - İmza olmadan herkes payload'ı değiştirebilir
+    ("sub": "1" → "sub": "999" gibi yetki yükseltme)
+  - Secret key ile imzalanınca sunucu değişikliği anlar
+
+========================================================
+JWT TOKEN ÇÖZME — decode_access_token
+========================================================
+
+Her korumalı API endpoint'inde çalışır.
+jwt.decode() aynı anda 3 şeyi kontrol eder:
+  1. İmza geçerli mi?     → secret key ile doğrular
+  2. Süre dolmuş mu?      → "exp" claim otomatik kontrol edilir
+  3. Algoritma doğru mu?  → farklı algoritmayı reddeder
+
+Herhangi biri başarısız → JWTError → None döner → istek reddedilir
+Başarılı → payload dict döner → payload["sub"] = user.id
+
+========================================================
+SALDIRI KORUMALARI
+========================================================
+
+DB sızıntısı        → bcrypt hash, plain şifre yok
+Rainbow table       → her hash'e farklı salt
+Token sahteciliği   → JWT imzası (secret key)
+Süresi dolmuş token → "exp" claim otomatik kontrol
+Algoritma karıştırma → algorithms=[...] ile kısıtlama
+Brute-force         → bcrypt'in kasıtlı yavaşlığı
+
+========================================================
+KULLANıM AKIŞI
+========================================================
+
+KAYIT:
+  kullanıcı şifre girer
+      ↓
+  get_password_hash() → bcrypt hash
+      ↓
+  hash DB'ye kaydedilir (plain şifre asla)
+
+GİRİŞ:
+  kullanıcı email + şifre gönderir
+      ↓
+  DB'den hash çekilir
+      ↓
+  verify_password() → eşleşirse True
+      ↓
+  create_access_token(user.id) → JWT token
+      ↓
+  token kullanıcıya gönderilir
+
+KORUNAN ENDPOINT:
+  istek → Authorization: Bearer <token>
+      ↓
+  decode_access_token() → payload veya None
+      ↓
+  payload["sub"] → user.id → DB'den kullanıcı çekilir
+      ↓
+  işlem yapılır veya 401 döner
+
+========================================================
+
+========================================================
+SCHEMAS/USER.PY — API GİRİŞ/ÇIKIŞ ŞEMALARI
+========================================================
+
+## GENEL AMAÇ
+models/user.py DB tablosunu tanımlar.
+schemas/user.py API'nin ne alıp ne vereceğini tanımlar.
+İkisi birbirinden kasıtlı olarak ayrıdır.
+
+  models/user.py  → SQLAlchemy → DB katmanı → tüm kolonlar
+  schemas/user.py → Pydantic   → HTTP katmanı → sadece API'ye açık alanlar
+
+## UserCreate — Kayıt İsteği Şeması
+POST /auth/register endpoint'ine gelen body bu şemaya göre
+validate edilir.
+
+  email: EmailStr
+    → Sadece str değil, format kontrolü yapılır
+    → "abc" veya "ali@" gelirse otomatik 422 döner
+
+  password: str = Field(min_length=6, max_length=128)
+    → min_length=6  : çok kısa şifre reddedilir
+    → max_length=128: bcrypt'i DoS'lamak engellenir
+    → Şifre buradan gelir ama DB'ye ASLA yazılmaz
+    → security.py get_password_hash() ile hash'lenerek kaydedilir
+
+  full_name: str | None = None
+    → Opsiyonel, gönderilmezse None, kayıt yine kabul edilir
+
+## UserRead — Kayıt Yanıtı Şeması
+GET /users/me gibi endpoint'lerin response şeması.
+API'nin kullanıcıya geri döndürdüğü veriyi temsil eder.
+
+  Alanlar: id, email, full_name, is_active, is_superuser, created_at
+
+  KRİTİK: hashed_password yok.
+  DB'deki User modelinde bu alan var ama şemaya dahil edilmedi.
+  API asla şifre hash'ini dışarı sızdırmaz. Bilinçli güvenlik kararı.
+
+  model_config = {"from_attributes": True}
+    → Pydantic v2 ayarı
+    → Olmadan sadece dict'ten okuyabilir
+    → Bu ayarla SQLAlchemy ORM nesnesinden doğrudan okur
+    → db.query(User).first() → UserRead.model_validate(db_user) çalışır
+
+## NEDEN AYRI SINIFLAR?
+  İstek → UserCreate validate eder → iş mantığı
+                                          ↓
+                                  DB'den User nesnesi
+                                          ↓
+                          UserRead filtreler → response
+
+  UserCreate : Gelen veriyi validate et, şifreyi kabul et
+  UserRead   : Giden veriyi filtrele, hassas alanları gizle
+
+========================================================
+SCHEMAS/TOKEN.PY — JWT TOKEN ŞEMALARI
+========================================================
+
+## Token — Login Response Şeması
+Login başarılı olunca API'nin döndürdüğü response.
+
+  access_token: str
+    → create_access_token() ile üretilen JWT string
+
+  token_type: str = "bearer"
+    → OAuth2 standardı, sabit "bearer" değeri
+    → Client bunu alıp her istekte şu header'ı gönderir:
+      Authorization: Bearer <token>
+
+  Örnek response:
+    {
+      "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6...",
+      "token_type": "bearer"
+    }
+
+## TokenPayload — JWT İçi Veri Şeması
+Token decode edilince içinden çıkan payload'ı temsil eder.
+
+  sub: str | None = None
+    → security.py'da token üretilirken "sub": str(user.id)
+      olarak set edilen user.id değeri
+    → None olabilir: token geçersizse uygulama patlamaz
+
+  Kullanım:
+    payload = decode_access_token(token)
+    token_data = TokenPayload(**payload)
+    user_id = token_data.sub  # "42" gibi
+
+## İKİ SINIFIN FARKI
+  Token        → Login response'u dönerken  (API → Client)
+  TokenPayload → Token doğrulanırken        (JWT içi → Uygulama)
+
+========================================================
+GENEL ŞEMA MİMARİSİ
+========================================================
+
+LOGIN AKIŞI:
+  POST /auth/login (email + password)
+      ↓
+  UserCreate ile validate edilir
+      ↓
+  verify_password() → doğruysa
+      ↓
+  create_access_token(user.id)
+      ↓
+  Token şeması → {"access_token": "...", "token_type": "bearer"}
+
+KORUNAN ENDPOINT AKIŞI:
+  GET /users/me + Authorization: Bearer <token>
+      ↓
+  decode_access_token() → TokenPayload → sub = user.id
+      ↓
+  DB'den kullanıcı çekilir
+      ↓
+  UserRead şeması filtreler → response (şifre hash'i yok)
+
+========================================================
+
+========================================================
+SERVICES/USER_SERVICE.PY — KULLANICI İŞ MANTIĞI
+========================================================
+
+## NEDEN AYRI BİR SERVICE KATMANI?
+
+  API endpoint  →  service       →  DB (model)
+  (HTTP katmanı)   (iş mantığı)     (veri katmanı)
+
+  Endpoint sadece HTTP işleriyle ilgilenir (istek al, response dön).
+  İş mantığı service'te olur.
+  Avantajlar:
+    - Aynı mantık birden fazla endpoint'ten çağrılabilir
+    - Test edilmesi kolaylaşır
+    - Katmanlar birbirinden bağımsız değiştirilebilir
+
+========================================================
+FONKSİYONLAR
+========================================================
+
+## get_user_by_email(db, email) → User | None
+  db.query(User).filter(User.email == email).first()
+  → SELECT * FROM users WHERE email = ? LIMIT 1
+  → Kayıt yoksa None döner
+  Kullanım: login + "email zaten kayıtlı mı?" kontrolü
+
+## get_user_by_id(db, user_id) → User | None
+  db.query(User).filter(User.id == user_id).first()
+  → Token decode edilince sub alanından gelen user.id ile
+    DB'den kullanıcı çekmek için kullanılır
+  Kullanım: GET /users/me gibi korumalı endpoint'ler
+
+## create_user(db, user_in: UserCreate) → User
+  Adımlar sırasıyla:
+
+  1. hashed_password = get_password_hash(user_in.password)
+       → İlk iş: plain text şifre hemen hash'lenir
+       → Bundan sonra plain şifre bir daha kullanılmaz
+
+  2. user = User(email=..., hashed_password=..., ...)
+       → ORM nesnesi oluşturulur
+       → is_active=True  : yeni kullanıcı aktif başlar
+       → is_superuser=False : sabit, güvenlik gereği
+         (yeni kullanıcı asla admin olamaz)
+
+  3. db.add(user)
+       → Session'a eklenir, henüz DB'ye yazılmadı
+
+  4. db.commit()
+       → Transaction tamamlanır, INSERT SQL çalışır
+       → Veri DB'ye fiziksel olarak yazılır
+
+  5. db.refresh(user)
+       → DB'nin atadığı id, created_at, updated_at
+         değerleri Python nesnesine geri yüklenir
+       → Bu olmadan user.id hala None olurdu
+
+  6. return user
+       → Endpoint bunu UserRead şemasına çevirir
+
+## authenticate_user(db, email, password) → User | None
+  Login işleminin tek fonksiyonu. Ya User döner ya None.
+
+  user = get_user_by_email(db, email)
+  if not user: return None
+    → Email DB'de yok
+
+  if not verify_password(password, user.hashed_password): return None
+    → Şifre yanlış
+
+  KRİTİK GÜVENLİK KARARI:
+  "Email bulunamadı" ve "şifre yanlış" için AYRI mesaj verilmez.
+  İkisi de None döner. Neden?
+  → Saldırgan hangi email'in kayıtlı olduğunu anlayamasın
+  → User Enumeration saldırısı engellenir
+
+========================================================
+KATMANLARIN BİRLİKTE ÇALIŞMASI
+========================================================
+
+POST /auth/register:
+  UserCreate (validate) → create_user()
+    ├── get_password_hash()        ← security.py
+    ├── User(hashed_password=...)  ← models/user.py
+    ├── db.add / commit / refresh  ← session.py
+    └── User nesnesi döner
+  UserRead (filtrele) → response
+
+POST /auth/login:
+  authenticate_user(db, email, password)
+    ├── get_user_by_email()
+    ├── verify_password()          ← security.py
+    └── User veya None döner
+  create_access_token(user.id)     ← security.py
+  Token şeması → response
+
+GET /users/me:
+  decode_access_token(token) → sub = user.id
+  get_user_by_id(db, user_id)
+  UserRead (filtrele) → response
+
+========================================================
+========================================================
+API/V1/AUTH.PY — KİMLİK DOĞRULAMA ENDPOINT'LERİ
+========================================================
+
+## GENEL AMAÇ
+Register ve login HTTP endpoint'lerini barındırır.
+İş mantığı YAPMAZ — koordine eder.
+  Validasyon    → Pydantic şemalar
+  İş mantığı   → user_service.py
+  DB bağlantısı → session.py
+  Güvenlik      → security.py
+  Auth.py       → bunları bir araya getirir, hata yönetir
+
+========================================================
+ROUTER TANIMI
+========================================================
+
+router = APIRouter(prefix="/auth", tags=["Auth"])
+  - prefix="/auth" → tüm endpoint'ler /auth/... ile başlar
+  - tags=["Auth"]  → Swagger UI'da "Auth" grubu altında görünür
+
+========================================================
+POST /auth/register
+========================================================
+
+@router.post("/register", response_model=UserRead, status_code=201)
+
+  response_model=UserRead
+    → Dönüş UserRead şemasından geçirilir
+    → hashed_password otomatik çıkarılır, dışarı sızmaz
+
+  status_code=201
+    → Kaynak oluşturulunca standart HTTP kodu 201'dir (200 değil)
+
+PARAMETRELER:
+  user_in: UserCreate
+    → Request body otomatik parse ve validate edilir
+    → Geçersiz email veya kısa şifre → endpoint koda girmeden 422 döner
+
+  db: Session = Depends(get_db)
+    → get_db() generator çalışır, session enjekte edilir
+    → İstek bitince otomatik kapatılır
+
+AKIM:
+  1. get_user_by_email() → email kayıtlı mı kontrol et
+  2. Kayıtlıysa → 400 Bad Request + açıklayıcı mesaj
+     (DB unique kısıtı da engeller ama bu daha önce çalışır,
+      kullanıcıya anlamlı mesaj verir)
+  3. create_user() → service katmanına devret
+  4. Dönen User nesnesi → UserRead filtreler → response
+
+========================================================
+POST /auth/login
+========================================================
+
+@router.post("/login", response_model=Token)
+  → Response: {"access_token": "...", "token_type": "bearer"}
+
+PARAMETRELER:
+  form_data: OAuth2PasswordRequestForm = Depends()
+    → FastAPI built-in OAuth2 form şeması
+    → application/x-www-form-urlencoded formatı bekler (OAuth2 standardı)
+    → Email gönderilse de alan adı "username"dir — standart böyle
+    → form_data.username ve form_data.password ile erişilir
+
+  db: Session = Depends(get_db)
+    → DB session enjekte edilir
+
+AKIM:
+  1. authenticate_user() → email + şifre doğrula
+     → None dönerse:
+       401 Unauthorized + "Incorrect email or password."
+       headers={"WWW-Authenticate": "Bearer"}
+         → OAuth2 standardı zorunlu kılar
+         → Tarayıcıya "bearer token bekliyorum" sinyali
+       KRİTİK: "email mi yanlış şifre mi?" söylenmiyor
+         → User Enumeration saldırısı engellenir
+
+  2. is_active kontrolü
+     → False ise 400 Bad Request + "Inactive user."
+     → Soft-delete: hesap silinmez, devre dışı bırakılır
+     → Devre dışı hesaba token üretilmez
+
+  3. Token süresi config'den okunur (ACCESS_TOKEN_EXPIRE_MINUTES)
+     create_access_token(subject=user.id, expires_delta=...)
+     → user.id token'ın "sub" alanına yazılır
+
+  4. Token(access_token=..., token_type="bearer") → response
+
+========================================================
+HTTP DURUM KODLARI VE ANLAMLARI
+========================================================
+
+201 Created      → Kayıt başarılı, yeni kaynak oluşturuldu
+400 Bad Request  → Email zaten kayıtlı / hesap pasif
+401 Unauthorized → Email veya şifre yanlış
+422 Unprocessable→ Geçersiz veri (Pydantic otomatik üretir)
+
+========================================================
+GENEL MİMARİ AKIŞ
+========================================================
+
+HTTP isteği gelir
+      ↓
+FastAPI → Pydantic şema validate eder
+      ↓
+Endpoint → service fonksiyonu çağırır
+      ↓
+Service → DB işlemi yapar, sonuç döner
+      ↓
+Endpoint → hata kontrolü (HTTPException)
+      ↓
+Pydantic → response_model ile çıktıyı filtreler
+      ↓
+Client'a response gider
+
+========================================================
+TÜM SİSTEMİN REGISTER/LOGIN AKIŞI
+========================================================
+
+REGISTER:
+  POST /auth/register (body: email + password)
+      ↓
+  UserCreate validate → email format, şifre uzunluğu
+      ↓
+  Email kayıtlı mı? → Evet: 400 Hayır: devam
+      ↓
+  get_password_hash() → bcrypt hash
+      ↓
+  db.add/commit/refresh → users tablosuna INSERT
+      ↓
+  UserRead filtrele → 201 + kullanıcı bilgileri (şifresiz)
+
+LOGIN:
+  POST /auth/login (form: username + password)
+      ↓
+  authenticate_user() → email bul + verify_password()
+      ↓
+  Başarısız → 401 | Pasif hesap → 400
+      ↓
+  create_access_token(user.id) → JWT imzalanır
+      ↓
+  Token → {"access_token": "eyJ...", "token_type": "bearer"}
+
+========================================================
+
+========================================================
+API/V1/AUTH.PY — KİMLİK DOĞRULAMA ENDPOINT'LERİ
+========================================================
+
+## GENEL AMAÇ
+Register ve login HTTP endpoint'lerini barındırır.
+İş mantığı YAPMAZ — koordine eder.
+  Validasyon    → Pydantic şemalar
+  İş mantığı   → user_service.py
+  DB bağlantısı → session.py
+  Güvenlik      → security.py
+  Auth.py       → bunları bir araya getirir, hata yönetir
+
+========================================================
+ROUTER TANIMI
+========================================================
+
+router = APIRouter(prefix="/auth", tags=["Auth"])
+  - prefix="/auth" → tüm endpoint'ler /auth/... ile başlar
+  - tags=["Auth"]  → Swagger UI'da "Auth" grubu altında görünür
+
+========================================================
+POST /auth/register
+========================================================
+
+@router.post("/register", response_model=UserRead, status_code=201)
+
+  response_model=UserRead
+    → Dönüş UserRead şemasından geçirilir
+    → hashed_password otomatik çıkarılır, dışarı sızmaz
+
+  status_code=201
+    → Kaynak oluşturulunca standart HTTP kodu 201'dir (200 değil)
+
+PARAMETRELER:
+  user_in: UserCreate
+    → Request body otomatik parse ve validate edilir
+    → Geçersiz email veya kısa şifre → endpoint koda girmeden 422 döner
+
+  db: Session = Depends(get_db)
+    → get_db() generator çalışır, session enjekte edilir
+    → İstek bitince otomatik kapatılır
+
+AKIM:
+  1. get_user_by_email() → email kayıtlı mı kontrol et
+  2. Kayıtlıysa → 400 Bad Request + açıklayıcı mesaj
+     (DB unique kısıtı da engeller ama bu daha önce çalışır,
+      kullanıcıya anlamlı mesaj verir)
+  3. create_user() → service katmanına devret
+  4. Dönen User nesnesi → UserRead filtreler → response
+
+========================================================
+POST /auth/login
+========================================================
+
+@router.post("/login", response_model=Token)
+  → Response: {"access_token": "...", "token_type": "bearer"}
+
+PARAMETRELER:
+  form_data: OAuth2PasswordRequestForm = Depends()
+    → FastAPI built-in OAuth2 form şeması
+    → application/x-www-form-urlencoded formatı bekler (OAuth2 standardı)
+    → Email gönderilse de alan adı "username"dir — standart böyle
+    → form_data.username ve form_data.password ile erişilir
+
+  db: Session = Depends(get_db)
+    → DB session enjekte edilir
+
+AKIM:
+  1. authenticate_user() → email + şifre doğrula
+     → None dönerse:
+       401 Unauthorized + "Incorrect email or password."
+       headers={"WWW-Authenticate": "Bearer"}
+         → OAuth2 standardı zorunlu kılar
+         → Tarayıcıya "bearer token bekliyorum" sinyali
+       KRİTİK: "email mi yanlış şifre mi?" söylenmiyor
+         → User Enumeration saldırısı engellenir
+
+  2. is_active kontrolü
+     → False ise 400 Bad Request + "Inactive user."
+     → Soft-delete: hesap silinmez, devre dışı bırakılır
+     → Devre dışı hesaba token üretilmez
+
+  3. Token süresi config'den okunur (ACCESS_TOKEN_EXPIRE_MINUTES)
+     create_access_token(subject=user.id, expires_delta=...)
+     → user.id token'ın "sub" alanına yazılır
+
+  4. Token(access_token=..., token_type="bearer") → response
+
+========================================================
+HTTP DURUM KODLARI VE ANLAMLARI
+========================================================
+
+201 Created      → Kayıt başarılı, yeni kaynak oluşturuldu
+400 Bad Request  → Email zaten kayıtlı / hesap pasif
+401 Unauthorized → Email veya şifre yanlış
+422 Unprocessable→ Geçersiz veri (Pydantic otomatik üretir)
+
+========================================================
+GENEL MİMARİ AKIŞ
+========================================================
+
+HTTP isteği gelir
+      ↓
+FastAPI → Pydantic şema validate eder
+      ↓
+Endpoint → service fonksiyonu çağırır
+      ↓
+Service → DB işlemi yapar, sonuç döner
+      ↓
+Endpoint → hata kontrolü (HTTPException)
+      ↓
+Pydantic → response_model ile çıktıyı filtreler
+      ↓
+Client'a response gider
+
+========================================================
+TÜM SİSTEMİN REGISTER/LOGIN AKIŞI
+========================================================
+
+REGISTER:
+  POST /auth/register (body: email + password)
+      ↓
+  UserCreate validate → email format, şifre uzunluğu
+      ↓
+  Email kayıtlı mı? → Evet: 400 Hayır: devam
+      ↓
+  get_password_hash() → bcrypt hash
+      ↓
+  db.add/commit/refresh → users tablosuna INSERT
+      ↓
+  UserRead filtrele → 201 + kullanıcı bilgileri (şifresiz)
+
+LOGIN:
+  POST /auth/login (form: username + password)
+      ↓
+  authenticate_user() → email bul + verify_password()
+      ↓
+  Başarısız → 401 | Pasif hesap → 400
+      ↓
+  create_access_token(user.id) → JWT imzalanır
+      ↓
+  Token → {"access_token": "eyJ...", "token_type": "bearer"}
+
+========================================================
+
+========================================================
+API/V1/USERS.PY — KULLANICI ENDPOINT'LERİ VE KİMLİK DOĞRULAMA
+========================================================
+
+## GENEL AMAÇ
+İki görevi var:
+  1. get_current_user: token doğrulayan yeniden kullanılabilir dependency
+  2. GET /users/me: giriş yapmış kullanıcının bilgilerini döner
+
+========================================================
+OAUTH2 SCHEME
+========================================================
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+  - Her istekte Authorization: Bearer <token> header'ını okur
+  - Token string'ini otomatik çıkarır
+  - tokenUrl: Swagger UI Authorize butonunu bu endpoint'e yönlendirir
+  - Depends(oauth2_scheme) ile kullanılır
+
+========================================================
+get_current_user — KİMLİK DOĞRULAMA DEPENDENCY'Sİ
+========================================================
+
+Endpoint değil, dependency fonksiyonu.
+Depends(get_current_user) yazılan her endpoint bu kodu çalıştırır.
+Tekrar tekrar yazmak gerekmez.
+
+PARAMETRELER:
+  token: str = Depends(oauth2_scheme)
+    → Authorization header'dan token otomatik alınır
+  db: Session = Depends(get_db)
+    → DB session enjekte edilir
+
+KONTROL ADIMLARI (sırasıyla):
+
+  1. decode_access_token(token)
+     → None dönerse: 401 "Invalid authentication credentials."
+     → Token geçersiz, süresi dolmuş veya imzası bozuk
+     → Üç farklı hata aynı mesajla döner (hangisi olduğu söylenmez)
+
+  2. payload.get("sub")
+     → None dönerse: 401 "Invalid token payload."
+     → .get() kullanılır — payload["sub"] KeyError fırlatır, güvensiz
+     → Token geçerli ama içinde sub yoksa bozuk token
+
+  3. get_user_by_id(db, int(user_id))
+     → None dönerse: 401 "User not found."
+     → Token geçerli ama kullanıcı silinmiş olabilir
+     → Her istekte DB'den kontrol yapılır
+     → Silinen kullanıcı token süresi dolana kadar erişemez
+
+  4. is_active kontrolü
+     → False ise: 400 "Inactive user."
+     → Soft-delete: hesap silinmez, devre dışı bırakılır
+
+  5. return user
+     → Tüm kontroller geçildi, User ORM nesnesi döner
+
+========================================================
+GET /users/me
+========================================================
+
+@router.get("/me", response_model=UserRead)
+def read_current_user(current_user=Depends(get_current_user)):
+    return current_user
+
+  - Endpoint'in kendi kodu tek satır: return current_user
+  - Tüm iş Depends(get_current_user) ile yapıldı
+  - response_model=UserRead → hashed_password otomatik çıkarılır
+
+========================================================
+DEPENDS ZİNCİRİ — TAM AKIŞ
+========================================================
+
+GET /users/me isteği gelir
+      ↓
+Depends(get_current_user) tetiklenir
+      ↓
+  Depends(oauth2_scheme) → Authorization header'dan token
+  Depends(get_db)        → DB session açılır
+      ↓
+  decode_access_token()  → payload
+  payload["sub"]         → user_id
+  get_user_by_id()       → User nesnesi
+  is_active kontrolü
+      ↓
+current_user = User nesnesi
+      ↓
+return current_user → UserRead filtreler → response
+
+========================================================
+NEDEN BU TASARIM? (Reusable Dependency)
+========================================================
+
+get_current_user bir kez yazıldı.
+İleride tüm korumalı endpoint'ler sadece şunu ekler:
+
+  def upload_document(current_user=Depends(get_current_user)):
+  def list_documents(current_user=Depends(get_current_user)):
+  def start_chat(current_user=Depends(get_current_user)):
+
+Kimlik doğrulama mantığı tek yerde, her endpoint'e dağıtılmaz.
+
+========================================================
+API/V1/ROUTER.PY — ANA ROUTER BİRLEŞTİRİCİ
+========================================================
+
+## GENEL AMAÇ
+Tüm v1 router'larını tek bir api_router altında toplar.
+main.py sadece bu tek router'ı bağlar.
+
+api_router = APIRouter()
+  → Kendi prefix'i yok, prefix main.py'da verilir (/api/v1)
+
+api_router.include_router(auth.router)   → prefix /auth
+api_router.include_router(users.router)  → prefix /users
+
+OLUŞAN URL'LER:
+  /api/v1/auth/register
+  /api/v1/auth/login
+  /api/v1/users/me
+
+NEDEN BU YAPI?
+  main.py'da tek satır yeterli:
+    app.include_router(api_router, prefix="/api/v1")
+
+  Yeni modül eklemek sadece iki satır:
+    from app.api.v1 import documents
+    api_router.include_router(documents.router)
+
+ROUTER HİYERARŞİSİ:
+  main.py → api_router (/api/v1)
+                ├── auth.router  (/auth)  → /api/v1/auth/register
+                │                         → /api/v1/auth/login
+                └── users.router (/users) → /api/v1/users/me
+
+  İleride eklenecekler:
+                ├── documents.router (/documents)
+                ├── chat.router      (/chat)
+                └── admin.router     (/admin)
+
+========================================================
+
