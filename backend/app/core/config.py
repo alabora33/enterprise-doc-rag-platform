@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     OPENAI_API_KEY: str | None = None
 
+    UPLOAD_DIR: str = "uploads"
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -1568,3 +1568,365 @@ KENDİ ORGANİZASYONLARIM (GET /organizations/me):
   list[UserOrganizationRead] → nested JSON response
 
 ========================================================
+
+========================================================
+COMMIT: "Add document upload and listing endpoints"
+— DOKÜMAN YÖNETİM KATMANININ EKLENMESİ
+========================================================
+
+Bu commit ile sistemin temel işlevi olan dosya yükleme
+altyapısı kuruldu. Kullanıcılar kendi organizasyonlarına
+dosya yükleyebilir, listeleyebilir ve tek tek sorgulayabilir.
+
+Etkilenen dosyalar (migration hariç):
+  GÜNCELLEME : core/config.py
+  GÜNCELLEME : models/__init__.py
+  GÜNCELLEME : api/v1/router.py
+  YENİ       : models/document.py
+  YENİ       : schemas/document.py
+  YENİ       : services/document_service.py
+  YENİ       : api/v1/documents.py
+  YENİ       : alembic/versions/7aac9eca3357_add_documents_table.py
+
+========================================================
+CORE/CONFIG.PY — GÜNCELLEME: UPLOAD_DIR EKLENDİ
+========================================================
+
+Değişen tek satır:
+  UPLOAD_DIR: str = "uploads"
+
+  Neden eklendi?
+    → Yüklenen dosyaların hangi klasöre kaydedileceği
+      sabit string yerine config üzerinden yönetilmeli.
+    → .env dosyasında UPLOAD_DIR=/data/uploads denerek
+      prod/dev ortamlarında farklı yollar kullanılabilir.
+    → Tüm servis kodları settings.UPLOAD_DIR ile bu değeri
+      okur, hiçbir yerde hardcoded path kalmaz.
+    → Güvenlik: farklı ortamlarda farklı disk bölümlerine
+      yönlendirme, container mount noktaları için esneklik.
+
+========================================================
+MODELS/DOCUMENT.PY — YENİ: DOKÜMAN MODELİ
+========================================================
+
+## DocumentStatus(str, Enum)
+
+class DocumentStatus(str, Enum):
+    UPLOADED   = "uploaded"
+    PROCESSING = "processing"
+    COMPLETED  = "completed"
+    FAILED     = "failed"
+
+  str, Enum kombinasyonu neden?
+    → str   : DB'ye ve JSON'a string olarak yazılır.
+    → Enum  : Geçersiz durum ataması önlenir.
+    → Durum geçişi:
+        Yüklendi → Celery kuyruğa aldı → tamamlandı/hata
+        UPLOADED → PROCESSING → COMPLETED veya FAILED
+    → Celery worker'lar doküman işlerken bu durumu günceller.
+      RAG pipeline'ın hangi aşamada olduğunu izlemek için.
+
+## Document(Base) — Kolon Analizi
+
+__tablename__ = "documents"
+
+  id: Integer — primary_key=True, index=True
+    → Her dokümanın benzersiz ID'si.
+
+  organization_id: ForeignKey("organizations.id", ondelete="CASCADE")
+    → Doküman hangi organizasyona ait.
+    → ondelete="CASCADE": Organizasyon silinince o organizasyonun
+      tüm dokümanları da otomatik silinir, orphan kayıt kalmaz.
+    → index=True: "Bu organizasyonun dokümanlarını getir" sorgusu
+      çok sık çalışacak, index kritik performans için.
+
+  uploaded_by_user_id: ForeignKey("users.id", ondelete="SET NULL")
+    → Dosyayı kim yükledi.
+    → ondelete="SET NULL" (CASCADE değil): Kullanıcı silinse bile
+      doküman korunur, sadece bu alan NULL olur.
+    → nullable=True: Sistem/otomatik yükleme ihtimali bırakıldı.
+    → Belge tarihçesi kullanıcı hesabından bağımsız tutulur.
+
+  original_file_name: String(255), nullable=False
+    → Kullanıcının yüklediği gerçek dosya adı (örn: "sözleşme.pdf").
+    → Kullanıcıya gösterilir, indirme ekranında kullanılır.
+
+  stored_file_name: String(255), nullable=False
+    → Diskte saklanan UUID'li isim (örn: "a3f7...pdf").
+    → original_file_name asla disk yolu olarak kullanılmaz.
+    → Güvenlik: "../../../etc/passwd" gibi path traversal
+      saldırıları önlenir. Kullanıcı girdisi disk'e yazmaz.
+    → Aynı isimde iki dosya çakışmaz, her dosya benzersiz.
+
+  file_path: String(500), nullable=False
+    → Dosyanın diskteki tam yolu.
+    → Celery worker dokümanı işlerken bu path'i kullanır.
+
+  content_type: String(100), nullable=True
+    → MIME tipi (application/pdf, application/vnd.openxmlformats...)
+    → Dosya indirme endpoint'inde Content-Type header'ı için.
+
+  file_size: Integer, nullable=True
+    → Bayt cinsinden dosya büyüklüğü.
+    → Kullanım kotası takibi için. (İleride: organizasyon
+      başına maksimum depolama limiti)
+
+  status: String(50), default=DocumentStatus.UPLOADED.value
+    → RAG pipeline durumu. UPLOADED ile başlar.
+    → index=True: "İşlenmemiş dosyaları getir" gibi sorgular için.
+
+  created_at / updated_at: DateTime, default=datetime.utcnow
+    → updated_at onupdate=datetime.utcnow: Durum her
+      değiştiğinde (PROCESSING, COMPLETED...) otomatik güncellenir.
+
+  organization = relationship("Organization")
+  uploaded_by  = relationship("User")
+    → ORM üzerinden ilişkili nesneye erişim.
+    → back_populates eklenmedi: Henüz ters yönden erişim
+      gerekmediği için tek yönlü bırakıldı.
+
+========================================================
+MODELS/__INIT__.PY — GÜNCELLEME
+========================================================
+
+Önceki hal:
+  from app.models.user import User
+  from app.models.organization import Organization, UserOrganizationRole
+  __all__ = ["User", "Organization", "UserOrganizationRole"]
+
+Yeni hal:
+  from app.models.document import Document eklendi
+  __all__'a "Document" eklendi
+
+  Neden gerekli?
+    → Alembic, Base.metadata'yı tarar. Document hiçbir yerden
+      import edilmemişse migration otomatik üretilemez.
+    → Bu satır Alembic'in "documents" tablosunu görmesini sağlar.
+
+========================================================
+SCHEMAS/DOCUMENT.PY — YENİ: DOKÜMAN READ ŞEMASI
+========================================================
+
+class DocumentRead(BaseModel):
+    id, organization_id, uploaded_by_user_id
+    original_file_name, stored_file_name, file_path
+    content_type, file_size, status, created_at
+
+  model_config = {"from_attributes": True}
+    → SQLAlchemy ORM nesnesinden doğrudan okur.
+    → db.query(Document).first() → DocumentRead.model_validate(doc)
+
+  Tasarım kararları:
+    → updated_at yok: Client'ın buna ihtiyacı olmadığı düşünüldü.
+    → file_path var: İleride indirme endpoint'i bu path'i kullanır.
+    → stored_file_name var: Admin debug için faydalı.
+    → Ayrı bir DocumentCreate şeması yazılmadı çünkü dosya yükleme
+      JSON body ile değil multipart/form-data ile gelir.
+      Pydantic şeması değil, UploadFile parametresi kullanılır.
+
+========================================================
+SERVICES/DOCUMENT_SERVICE.PY — YENİ: DOKÜMAN SERVİS KATMANI
+========================================================
+
+## validate_file_extension(filename) → None | ValueError
+
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".xls", ".txt"}
+
+  Path(filename).suffix.lower() kullanımı neden?
+    → "RAPOR.PDF" → ".pdf" (büyük/küçük harf normalize edilir)
+    → "dosya.tar.gz" → ".gz" (çift uzantılarda son kısım alınır)
+    → Güvenlik: extension whitelist (izin verilenler listesi).
+      Blacklist (yasaklılar listesi) yerine whitelist yaklaşımı
+      daha güvenli: bilinmeyen her format otomatik reddedilir.
+    → .exe, .sh, .py gibi tehlikeli dosyalar sunucuya alınmaz.
+
+## create_upload_directory() → str
+
+  os.makedirs(upload_dir, exist_ok=True)
+    → Klasör yoksa oluşturur, varsa hata fırlatmaz.
+    → Her yükleme isteğinde kontrol edilir.
+
+## generate_stored_file_name(original_file_name) → str
+
+  uuid.uuid4() + extension
+    → UUID v4: kriptografik olarak tahmin edilemez benzersiz ID.
+    → Kullanıcı adı disk yoluna hiç karışmaz.
+    → Güvenlik: "../../etc/passwd.pdf" gibi isimler diskte zararsız
+      bir UUID'ye dönüşür. Path traversal saldırısı engellenir.
+
+## save_upload_file(upload_file, stored_file_path) → int
+
+  Chunk'lı okuma: 1 MB'lık parçalarda okur ve yazar.
+    → Neden? 100 MB PDF doğrudan belleğe alınsaydı tüm dosya
+      RAM'de tutulurdu. Büyük dosyalarda bellek patlaması.
+    → 1 MB chunk: bellek sabit, dosya ne kadar büyük olursa olsun.
+    → total_size sayacı: her chunk'ın boyutu toplanarak
+      gerçek dosya boyutu hesaplanır (content-length header'ına
+      güvenilmez, manipüle edilebilir).
+  Return: int → bayt cinsinden toplam dosya boyutu.
+
+## create_document_record(db, organization_id, uploaded_by_user_id,
+                           upload_file) → Document
+
+  Tüm adımlar sırasıyla:
+  1. validate_file_extension() → izin verilen uzantı mı?
+  2. create_upload_directory()  → klasör var mı, yoksa oluştur
+  3. generate_stored_file_name()→ UUID'li güvenli isim üret
+  4. os.path.join(upload_dir, stored_file_name) → tam yol
+  5. save_upload_file() → dosyayı diske yaz, boyutu al
+  6. Document(...) ORM nesnesi oluştur
+  7. db.add / db.commit / db.refresh
+  8. return document
+
+  Önemli: Dosya önce diske yazılır, sonra DB'ye kaydedilir.
+  Tersine yapılsaydı DB kaydı başarılı ama disk yazımı başarısız
+  olabilirdi. Şu an DB başarılı ama disk başarısız olursa DB'de
+  dosyasız kayıt kalır — bu bilinçli kabul edilmiş teknik borç,
+  ileride transactional dosya yönetimi veya Celery ile çözülecek.
+
+## get_documents_by_organization(db, organization_id) → list[Document]
+
+  .order_by(Document.created_at.desc())
+    → En yeni dosya önce gelir. Listeleme UI için doğal sıra.
+
+## get_document_by_id_and_organization(db, document_id,
+                                        organization_id) → Document | None
+
+  İKİ filtre birlikte kullanılır:
+    Document.id == document_id
+    Document.organization_id == organization_id
+  Neden?
+    → Sadece ID filtresi kullansaydık başka organizasyonun
+      dokümanına ID biliniyorsa erişilebilirdi.
+    → İki filtre: sadece kendi organizasyonundaki dosyaya erişilir.
+    → Tenant isolation (kiracı izolasyonu) sağlanır.
+
+========================================================
+API/V1/DOCUMENTS.PY — YENİ: DOKÜMAN API ENDPOINT'LERİ
+========================================================
+
+## get_current_user_primary_organization_id(db, user_id) → int
+
+  Tüm endpoint'lerde tekrar eden bir işlem:
+  "Bu kullanıcının birincil organizasyonu hangisi?"
+  Yardımcı fonksiyon olarak çıkarıldı.
+
+  Neden [0].organization_id?
+    → Bir kullanıcı birden fazla organizasyona üye olabilir.
+    → Şimdilik basit tutuldu: ilk organizasyon kullanılır.
+    → İleride: hangi organizasyon bağlamında işlem yapılacağını
+      request header veya query param ile belirleyen yapı kurulacak.
+    → Organizasyonu yoksa 400: kullanıcı sistemi kullanamaz.
+
+## POST /documents/upload
+
+  @router.post("/upload", response_model=DocumentRead, status_code=201)
+    → status_code=201: Kaynak oluşturuldu.
+    → response_model=DocumentRead: ORM nesnesi şemayla filtrele.
+
+  file: UploadFile = File(...)
+    → multipart/form-data ile dosya alır.
+    → ... (Ellipsis): alan zorunlu, gönderilmezse 422 döner.
+    → UploadFile: dosyayı RAM'e almaz, stream olarak okur.
+
+  ValueError yakalanır → HTTPException 400'e çevrilir.
+    → validate_file_extension geçersiz uzantıda ValueError fırlatır.
+    → Service katmanı HTTP bilmez, sadece ValueError fırlatır.
+    → API katmanı bunu 400 Bad Request'e çevirir. Katman ayrımı.
+
+## GET /documents
+
+  Giriş yapmış kullanıcının organizasyonuna ait tüm dokümanları listeler.
+  Tenant isolation: organization_id ile filtrelenir, başka
+  organizasyonun dosyaları hiçbir zaman bu listeye girmez.
+
+## GET /documents/{document_id}
+
+  Tek doküman detayı. Document bulunamazsa 404 döner.
+  get_document_by_id_and_organization: iki filtre (id + org_id)
+  ile başka organizasyonun dosyasına erişim engellenir.
+
+========================================================
+API/V1/ROUTER.PY — GÜNCELLEME: DOCUMENTS ROUTER EKLENDİ
+========================================================
+
+Önceki hal:
+  from app.api.v1 import auth, users, organizations
+  api_router.include_router(auth.router)
+  api_router.include_router(users.router)
+  api_router.include_router(organizations.router)
+
+Yeni hal:
+  from app.api.v1 import auth, users, organizations, documents
+  api_router.include_router(documents.router)
+
+Oluşan yeni URL'ler:
+  POST /api/v1/documents/upload  → dosya yükle
+  GET  /api/v1/documents         → listeleme
+  GET  /api/v1/documents/{id}    → tek doküman
+
+ROUTER HİYERARŞİSİ GÜNCELLENDİ:
+  main.py → api_router (/api/v1)
+                ├── auth.router          → /api/v1/auth/...
+                ├── users.router         → /api/v1/users/...
+                ├── organizations.router → /api/v1/organizations/...
+                └── documents.router     → /api/v1/documents/...
+
+========================================================
+MİGRASYON: 7aac9eca3357_add_documents_table.py
+========================================================
+
+  Revision    : 7aac9eca3357
+  Revises     : d2294bf51c25 (organizasyonlar migration'ı)
+  Create Date : 2026-05-15 17:18:18
+
+  upgrade() ile oluşturulan şey:
+    - documents tablosu: tüm kolonlar
+    - organization_id FK → organizations.id (ondelete=CASCADE)
+    - uploaded_by_user_id FK → users.id (ondelete=SET NULL)
+    - 4 adet index:
+        ix_documents_id                → PK sorguları
+        ix_documents_organization_id   → "bu org'un dosyaları" sorgusu
+        ix_documents_uploaded_by_user_id → "bu user'ın dosyaları"
+        ix_documents_status            → "işlenmemiş dosyaları getir"
+                                          (Celery worker için kritik)
+
+  downgrade():
+    → 4 index drop, sonra tablo drop.
+    → Index önce drop edilir: FK/index varken tablo droplanamaz.
+
+  Komutlar:
+    alembic revision --autogenerate -m "add documents table"
+    alembic upgrade head
+
+========================================================
+TÜM DOKÜMAN YÜKLEME AKIŞI — BÜYÜK RESİM
+========================================================
+
+POST /api/v1/documents/upload + Authorization: Bearer <token>
+        ↓
+get_current_user() → JWT doğrulandı, user nesnesi alındı
+        ↓
+get_current_user_primary_organization_id() → org_id belirlendi
+        ↓
+validate_file_extension() → .pdf/.docx/... onaylandı
+        ↓
+generate_stored_file_name() → UUID isim üretildi
+        ↓
+save_upload_file() → 1 MB chunk'larla diske yazıldı
+        ↓
+Document ORM nesnesi → db.add/commit/refresh → DB'ye kaydedildi
+        ↓
+DocumentRead şeması → 201 response
+        ↓
+(İleride) Celery → status=PROCESSING → chunk → embed → vector DB
+                → status=COMPLETED
+
+GÜVENLİK ÖZETİ:
+  - Extension whitelist: sadece bilinen güvenli tipler
+  - UUID stored name: kullanıcı girdisi disk yoluna karışmaz
+  - Tenant isolation: her sorgu organization_id ile filtrelenir
+  - Kimlik doğrulama: tüm endpoint'ler get_current_user gerektirir
+  - Dosya boyutu: gerçek byte sayımı (header'a güvenilmez)
+
+========================================================
