@@ -3544,6 +3544,481 @@ NEDEN AYRI ENDPOINT?
     ile döner (tüm alanlar). Polling senaryosunda her saniye
     büyük bir JSON nesnesi almak yerine sadece durum bilgisi almak
     hem daha hızlı hem daha verimli.
+
+========================================================
+========================================================
+SON COMMIT — KULLANIM TAKİBİ VE ADMİN PANELİ
+========================================================
+
+Commit   : 203e235b70437f1455979e1e460c277321b17e1f
+Tarih    : 18 Mayıs 2026
+Yazar    : alabora33
+Mesaj    : "Add usage tracking and admin usage endpoints"
+
+Değişen / eklenen dosyalar:
+  YENİ → backend/alembic/versions/7f28c33f65de_add_usage_logs_table.py
+  YENİ → backend/app/api/v1/admin.py
+  YENİ → backend/app/models/usage.py
+  YENİ → backend/app/schemas/usage.py
+  YENİ → backend/app/services/usage_service.py
+  DEĞİŞTİ → backend/app/api/v1/chat.py
+  DEĞİŞTİ → backend/app/api/v1/documents.py
+  DEĞİŞTİ → backend/app/api/v1/router.py
+  DEĞİŞTİ → backend/app/api/v1/search.py
+  DEĞİŞTİ → backend/app/api/v1/users.py
+  DEĞİŞTİ → backend/app/models/__init__.py
+  DEĞİŞTİ → backend/app/workers/tasks.py
+
+========================================================
+1. YENİ VERİTABANI TABLOSU — usage_logs
+========================================================
+
+## NEDİR?
+Sistemdeki her kritik eylemin (doküman yükleme, sorgulama, RAG
+chat, yeniden işleme...) kayıt altına alındığı loglama tablosudur.
+Hangi kullanıcı, hangi organizasyon, ne zaman, ne yaptı sorusunu
+yanıtlar.
+
+## Migration Dosyası
+backend/alembic/versions/7f28c33f65de_add_usage_logs_table.py
+
+  revision      : 7f28c33f65de
+  down_revision : 2d176fb1b7b2   (bir önceki migration'ın üstüne eklendi)
+
+Oluşturulan tablo kolonları:
+  id              → Primary key, auto-increment
+  organization_id → Hangi organizasyona ait? (FK: organizations.id,
+                    ondelete="SET NULL" — org silinse log durur)
+  user_id         → Hangi kullanıcı yaptı? (FK: users.id,
+                    ondelete="SET NULL" — user silinse log durur)
+  action          → Ne yapıldı? (String 100) — indexed
+  resource_type   → İşlem hangi kaynak türü üzerinde yapıldı?
+                    (örn: "document", "search", "chat_session")
+  resource_id     → İlgili kaydın ID'si (opsiyonel)
+  detail          → Serbest metin açıklama (TEXT, opsiyonel)
+  created_at      → İşlemin zamanı (DateTime, indexed)
+
+Oluşturulan index'ler:
+  ix_usage_logs_action, ix_usage_logs_created_at, ix_usage_logs_id,
+  ix_usage_logs_organization_id, ix_usage_logs_resource_id,
+  ix_usage_logs_resource_type, ix_usage_logs_user_id
+
+Index'lerin önemi:
+  → Yönetim panelinde "bu organizasyonun tüm logları" veya
+    "bugünkü RAG chat sayısı" gibi sorgular index olmadan
+    full table scan yapar. Index ile bu sorgular milisaniyeler
+    içinde döner.
+
+downgrade() fonksiyonu:
+  → Tüm index'leri siler, ardından tabloyu düşürür.
+    Sıra önemli: önce index'ler, sonra tablo kaldırılır.
+
+========================================================
+2. YENİ MODEL — models/usage.py
+========================================================
+
+## UsageAction (Enum)
+Sistemdeki kayıt altına alınabilecek eylemleri listeler.
+String enum olduğu için DB'ye sabit metin olarak yazılır.
+
+  DOCUMENT_UPLOAD              → Kullanıcı yeni doküman yükledi
+  DOCUMENT_RETRY               → Hatalı doküman yeniden işleme başlatıldı
+  DOCUMENT_PROCESSING_COMPLETED → Celery worker işlemi tamamladı
+  DOCUMENT_PROCESSING_FAILED   → Celery worker işlem sırasında hata aldı
+  SEMANTIC_SEARCH              → Kullanıcı semantik arama yaptı
+  RAG_CHAT                     → Kullanıcı RAG sohbet sorusu sordu
+
+Enum kullanmanın avantajları:
+  → Kod içinde sabit string yazmak yerine UsageAction.RAG_CHAT
+    gibi tip güvenli değer kullanılır. Yazım hatası olmaz.
+  → Hangi eylem türlerinin mevcut olduğu tek bir yerden görülür.
+  → .value ile string'e dönüştürülür: UsageAction.RAG_CHAT.value == "rag_chat"
+
+## UsageLog (SQLAlchemy Model)
+__tablename__ = "usage_logs"
+
+Alanlar:
+  id              : int, PK, indexed
+  organization_id : int | None, FK → organizations.id, ondelete SET NULL
+  user_id         : int | None, FK → users.id, ondelete SET NULL
+  action          : str (100 char), not null, indexed
+  resource_type   : str | None (100 char), indexed
+  resource_id     : int | None, indexed
+  detail          : Text | None
+  created_at      : datetime, default=datetime.utcnow, indexed
+
+ondelete="SET NULL" neden tercih edildi?
+  → ondelete="CASCADE" olsaydı kullanıcı veya organizasyon silinince
+    tüm log kayıtları da silinirdi — audit trail kaybolurdu.
+  → SET NULL ile log kaydı korunur, sadece FK alanı NULL olur.
+    "Silinmiş kullanıcı bu eylemi gerçekleştirdi" bilgisi yine de
+    zaman damgası ve diğer alanlar aracılığıyla korunur.
+
+========================================================
+3. YENİ ŞEMALAR — schemas/usage.py
+========================================================
+
+## UsageLogRead (Pydantic)
+API'den log kaydı okunurken kullanılan response şeması.
+
+  id, organization_id, user_id, action, resource_type,
+  resource_id, detail, created_at
+
+  model_config = {"from_attributes": True}
+    → SQLAlchemy ORM nesnesini doğrudan okuyabilmek için
+
+## UsageSummary (Pydantic)
+Admin panelinin "genel bakış" endpoint'i için özet şema.
+
+  total_documents         → DB'deki toplam doküman sayısı
+  total_chunks            → DB'deki toplam chunk sayısı
+  total_chat_sessions     → Toplam sohbet oturumu sayısı
+  total_chat_messages     → Toplam sohbet mesajı sayısı
+  total_usage_logs        → Toplam log kaydı sayısı
+  document_upload_count   → Kaç kez doküman yüklendi
+  semantic_search_count   → Kaç kez semantik arama yapıldı
+  rag_chat_count          → Kaç kez RAG sorgusu yapıldı
+  document_retry_count    → Kaç kez yeniden işleme tetiklendi
+
+Bu şema bir "dashboard widget" gibi düşünülebilir: sistemin
+genel sağlığını tek API çağrısıyla özetler.
+
+========================================================
+4. YENİ SERVİS — services/usage_service.py
+========================================================
+
+## create_usage_log()
+İmza:
+  create_usage_log(
+      db, action, organization_id=None, user_id=None,
+      resource_type=None, resource_id=None, detail=None
+  ) → UsageLog
+
+Çalışma prensibi:
+  1. UsageLog nesnesi oluşturulur (action.value ile enum → string)
+  2. db.add(usage_log) → session'a eklenir
+  3. db.flush() → SQL'e dönüştürülür ama COMMIT YAPILMAZ
+
+  Neden db.flush() ve commit() yok?
+  → Caller (çağıran kod) kendi transaction'ını yönetir.
+    Log yazdıktan sonra başka işlemler de yapılıyor olabilir.
+    Tüm işlemler başarılıysa caller tek seferde db.commit() çağırır.
+    Hata olursa caller rollback yapar, log da dahil tüm değişiklikler
+    geri alınır. Bu veri tutarlılığı açısından doğru yaklaşımdır.
+
+## get_usage_logs()
+  db.query(UsageLog).order_by(UsageLog.created_at.desc()).limit(limit)
+  
+  → En yeni logları önce getirir (DESC sıralama)
+  → limit parametresi varsayılan 100, max 500 (admin API'de kısıtlı)
+  → Tüm tabloyu çekmek yerine sadece istenilen kadar satır alınır
+
+## get_usage_summary()
+  Her bir eylem tipi için ayrı COUNT sorgusu çalıştırır:
+  - Document, DocumentChunk, ChatSession, ChatMessage toplam sayıları
+  - Her UsageAction türü için filtrelenmiş COUNT
+  
+  Bir dict döner → UsageSummary şemasına otomatik map'lenir.
+  
+  Performans notu:
+    → Bu fonksiyon birden fazla COUNT sorgusu yapar.
+      Sistemde çok fazla log olunca yavaşlayabilir.
+      İleride cache (Redis) veya materialized view ile
+      optimize edilmesi düşünülebilir.
+
+========================================================
+5. YENİ API ROUTER — api/v1/admin.py
+========================================================
+
+router = APIRouter(prefix="/admin", tags=["Admin"])
+
+## GET /admin/usage/summary → UsageSummary
+  Sistemin genel istatistiklerini döner.
+  Sadece superuser erişebilir (get_current_superuser bağımlılığı).
+
+## GET /admin/usage/logs?limit=100 → list[UsageLogRead]
+  Son N log kaydını döner.
+  Query parametresi: limit (min 1, max 500, varsayılan 100)
+  Sadece superuser erişebilir.
+
+  Query parameter kısıtlaması neden önemli?
+  → limit=99999 gibi bir değer gelirse sunucu ve DB aşırı yüklenebilir.
+    ge=1 ve le=500 ile bu saldırı yüzeyi kapatılmıştır.
+
+Yetkilendirme akışı:
+  1. İstek gelir → Authorization: Bearer <token>
+  2. get_current_user() → token decode eder, DB'den user çeker
+  3. get_current_superuser() → user.is_superuser kontrolü yapar
+     → False ise: 403 Forbidden "The user does not have enough privileges."
+     → True ise: devam eder
+
+========================================================
+6. YENİ YETKİ BAĞIMLILIĞI — api/v1/users.py
+========================================================
+
+def get_current_superuser(current_user=Depends(get_current_user)):
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The user does not have enough privileges.",
+        )
+    return current_user
+
+Neden ayrı bir dependency?
+  → Admin endpoint'leri her zaman önce normal auth, sonra
+    superuser kontrolü yapar. Bu iki adımı tek dependency'ye
+    sarmak DRY (Don't Repeat Yourself) prensibini sağlar.
+  → Yeni admin endpoint eklendiğinde sadece
+    Depends(get_current_superuser) yazmak yeterli olur.
+  → 401 vs 403 farkı:
+      401 Unauthorized → kimlik doğrulama başarısız (kim olduğun bilinmiyor)
+      403 Forbidden    → kimliğin biliniyor ama yetkisiz (superuser değil)
+
+========================================================
+7. ROUTER KAYDININ GÜNCELLENMESİ — api/v1/router.py
+========================================================
+
+Öncesi:
+  from app.api.v1 import auth, users, organizations, documents, search, chat
+  api_router.include_router(chat.router)   ← son satır
+
+Sonrası:
+  from app.api.v1 import auth, users, organizations, documents, search, chat, admin
+  api_router.include_router(chat.router)
+  api_router.include_router(admin.router)  ← eklendi
+
+→ admin modülü import edildi ve router'a dahil edildi.
+  Artık /admin/* endpoint'leri aktif.
+
+========================================================
+8. KULLANIM LOGU ENTEGRASYONU — api/v1/chat.py
+========================================================
+
+Eklenen import:
+  from app.models.usage import UsageAction
+  from app.services.usage_service import create_usage_log
+
+Değişiklik:
+  RAG chat endpoint'inde (chat_with_documents), cevap oluşturulduktan
+  ve chat mesajı kaydedildikten SONRA, db.commit() öncesinde:
+
+  create_usage_log(
+      db=db,
+      action=UsageAction.RAG_CHAT,
+      organization_id=organization_id,
+      user_id=current_user.id,
+      resource_type="chat_session",
+      resource_id=chat_session.id,
+      detail=f"Question: {chat_request.question}",
+  )
+  db.commit()   ← Hem chat mesajı hem log aynı transaction'da commit edilir
+
+Önceki yapıda:
+  Cevap oluşturulunca direkt db.commit() + return yapılıyordu.
+  Şimdi commit öncesine log eklendi. Return ifadesi de kaldırıldı
+  (router response_model ile otomatik döner).
+
+Neden aynı transaction önemli?
+  → Log ve asıl işlem (RAG chat kaydı) aynı commit'te gider.
+    Birisi başarısız olursa ikisi de rollback olur.
+    "Chat kaydı var ama log yok" veya "log var ama chat yok"
+    gibi tutarsız durumlar oluşmaz.
+
+========================================================
+9. KULLANIM LOGU ENTEGRASYONU — api/v1/documents.py
+========================================================
+
+İki noktaya log eklendi:
+
+### 1. Doküman Yükleme (upload_document)
+  Celery task tetiklendikten sonra:
+  create_usage_log(
+      action=UsageAction.DOCUMENT_UPLOAD,
+      detail=f"Uploaded file: {document.original_file_name}",
+  )
+  db.commit()
+  db.refresh(document)   ← ID ve diğer DB alanlarını günceller
+
+  db.refresh(document) neden eklendi?
+  → process_document_task.delay() Celery'e task gönderir.
+    Ardından usage log yazılır ve commit yapılır.
+    db.refresh() ile Python nesnesinin DB'deki en güncel
+    halini alırız. Eğer başka bir işlem bu kaydı güncellemiş
+    olsaydı, güncel veriye erişiriz. Return öncesi şart.
+
+### 2. Doküman Yeniden İşleme (retry_document_processing)
+  Retry Celery task'ı tetiklendikten sonra:
+  create_usage_log(
+      action=UsageAction.DOCUMENT_RETRY,
+      detail=f"Retried processing for file: {document.original_file_name}",
+  )
+  db.commit()
+  db.refresh(document)
+
+  Önceki halde retry endpoint'i commit ve refresh yapmıyordu —
+  bu commit bu commit'te ayrıca düzeltildi.
+
+========================================================
+10. KULLANIM LOGU ENTEGRASYONU — api/v1/search.py
+========================================================
+
+Değişiklik:
+  Önceden direkt return semantic_search_chunks(...) yapılıyordu.
+  Şimdi sonuç bir değişkene alınır, log yazılır, commit yapılır,
+  ardından sonuç döndürülür:
+
+  results = semantic_search_chunks(...)
+
+  create_usage_log(
+      action=UsageAction.SEMANTIC_SEARCH,
+      resource_type="search",
+      resource_id=None,   ← arama işlemine özgü ID yok
+      detail=f"Query: {search_request.query}",
+  )
+
+  db.commit()
+  return results
+
+  resource_id=None neden?
+  → Semantik arama bir "kaynak" oluşturmaz, sadece sorgulama yapar.
+    Hangi belge üzerinde arama yapıldığı değil, sorgunun kendisi
+    detail alanında saklanır.
+
+========================================================
+11. KULLANIM LOGU ENTEGRASYONU — workers/tasks.py
+========================================================
+
+Celery worker'da doküman işleme tamamlandığında log yazılır:
+
+  process_document(db=db, document_id=document_id)
+  → document nesnesi döner (işlenmiş belge)
+
+  create_usage_log(
+      action=UsageAction.DOCUMENT_PROCESSING_COMPLETED,
+      organization_id=document.organization_id,
+      user_id=document.uploaded_by_user_id,
+      resource_type="document",
+      resource_id=document.id,
+      detail=f"Document processing completed: {document.original_file_name}",
+  )
+  db.commit()
+
+Neden worker'da da log var?
+  → Doküman yükleme anında log yazılır (DOCUMENT_UPLOAD).
+    Ama işleme asenkron ve arka planda çalışır.
+    Kullanıcı ne zaman işleme başladı ve ne zaman tamamlandı
+    bilgisini admin panelinden görebilmek için Celery task
+    içinde de log tutulması gerekir.
+    Böylece upload → processing_completed zaman farkı hesaplanabilir.
+
+models/__init__.py güncellendi:
+  UsageLog modeli de dışa açıldı:
+  from app.models.usage import UsageLog
+  __all__'a "UsageLog" eklendi
+  → Alembic'in UsageLog'u keşfedebilmesi için gerekli.
+    Import edilmeden Base.metadata'ya giremez,
+    migration'da tablo üretilemez.
+
+========================================================
+GENEL MİMARİ BAKIŞ — KULLANIM TAKİP SİSTEMİ
+========================================================
+
+## Veri Akışı
+
+  Kullanıcı eylem yapar (upload/search/chat/retry)
+            ↓
+  API endpoint iş mantığını çalıştırır
+            ↓
+  create_usage_log() → UsageLog nesnesi session'a eklenir (flush)
+            ↓
+  db.commit() → Hem asıl işlem hem log aynı anda DB'ye yazılır
+            ↓
+  usage_logs tablosuna yeni satır eklenir
+
+  Celery worker'da doküman işlenince:
+  process_document() tamamlanır
+            ↓
+  create_usage_log(DOCUMENT_PROCESSING_COMPLETED)
+            ↓
+  db.commit()
+
+## Admin Panel Veri Akışı
+
+  GET /admin/usage/summary
+            ↓
+  get_current_superuser() → is_superuser kontrolü
+            ↓
+  get_usage_summary(db) → 9 farklı COUNT sorgusu
+            ↓
+  UsageSummary şeması → response
+
+  GET /admin/usage/logs?limit=50
+            ↓
+  get_current_superuser() → is_superuser kontrolü
+            ↓
+  get_usage_logs(db, limit=50) → Son 50 log DESC sıralı
+            ↓
+  list[UsageLogRead] → response
+
+## Güvenlik Katmanları
+
+  Yetkilendirme:
+    → /admin/* endpoint'lerine sadece is_superuser=True olan
+      kullanıcılar erişebilir. Normal kullanıcı → 403.
+
+  Veri sızıntısı önlemi:
+    → Log detaylarında (detail alanı) sorgu metni ve dosya adı
+      gibi bilgiler tutulur. Bu bilgiler sadece /admin endpoint'i
+      üzerinden, sadece superuser'lara sunulur. Normal kullanıcı
+      başkasının sorgularını göremez.
+
+  Query limit kısıtı:
+    → limit parametresi Query(ge=1, le=500) ile sınırlandırılmıştır.
+      1'den az veya 500'den fazla değer gelirse 422 döner.
+      Bu, potansiyel DoS girişimlerini önler.
+
+  Transaction bütünlüğü:
+    → Log ve asıl işlem aynı transaction'da. Birisi başarısız
+      olursa ikisi birden rollback olur. Tutarsız log durumu oluşmaz.
+
+## Neden usage_logs Ayrı Tablo?
+
+  Alternatif düşünülebilirdi: her modele (Document, ChatSession...)
+  ayrı sayaç kolonları eklemek.
+
+  usage_logs ayrı tablo tercihinin avantajları:
+  → Genişletilebilirlik: yeni eylem tipi eklenmek istenirse
+    sadece UsageAction enum'a yeni değer eklenir, tablo şeması
+    değişmez.
+  → Tarihçe: sayaç kolonları sadece "kaç kez yapıldı" der.
+    usage_logs "kim, ne zaman, hangi kaynak üzerinde, ne yaptı"
+    bilgisini tam olarak saklar.
+  → Audit trail: kullanıcı silindi dahi (SET NULL) log kayıtları
+    yok olmaz. Geçmiş erişimler takip edilebilir.
+  → Raporlama: tarih aralığına göre, organizasyona göre,
+    kullanıcıya göre filtreleme mümkündür. Sayaç kolonlarıyla
+    bu mümkün olmazdı.
+
+========================================================
+ÖZET TABLO — BU COMMİT'TE NE EKLENDİ?
+========================================================
+
+  Bileşen               Dosya                          Açıklama
+  ─────────────────────────────────────────────────────────────────
+  DB Migration          alembic/versions/7f28c33f65de  usage_logs tablosu
+  ORM Model             models/usage.py                UsageLog + UsageAction
+  API Şeması            schemas/usage.py               UsageLogRead + UsageSummary
+  Servis Katmanı        services/usage_service.py      create/get log + summary
+  Admin API             api/v1/admin.py                /admin/usage/summary + /logs
+  Superuser Dependency  api/v1/users.py                get_current_superuser()
+  Router Kaydı          api/v1/router.py               admin router dahil edildi
+  Chat Log              api/v1/chat.py                 RAG_CHAT logu eklendi
+  Documents Log         api/v1/documents.py            UPLOAD + RETRY logu eklendi
+  Search Log            api/v1/search.py               SEMANTIC_SEARCH logu eklendi
+  Worker Log            workers/tasks.py               PROCESSING_COMPLETED logu
+  Model Export          models/__init__.py             UsageLog dışa açıldı
+
+========================================================
   → Mobil istemci veya Frontend için lightweight endpoint.
   → İleride WebSocket veya Server-Sent Events ile replace edilebilir,
     ama polling için bu endpoint yeterli başlangıç noktası.

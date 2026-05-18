@@ -1,0 +1,322 @@
+========================================================
+FRONTEND — GENEL MİMARİ VE TEKNOLOJİ YIĞINI
+========================================================
+
+## KULLANILAN TEKNOLOJİLER
+
+  React 19         : UI bileşen kütüphanesi
+  Vite 8           : Build tool ve geliştirme sunucusu (CRA yerine)
+  React Router v7  : İstemci taraflı sayfa yönlendirme (SPA routing)
+  Axios            : HTTP istekleri için (fetch yerine)
+  Tailwind CSS v3  : Utility-first CSS framework (inline style yerine)
+
+## NEDEN BU STACK?
+
+  Vite (CRA değil):
+    → CRA (Create React App) artık bakımsız ve yavaş.
+    → Vite, ES modüllerini native olarak sunar → geliştirmede
+      anında yenileme (HMR), production build 10x daha hızlı.
+
+  Axios (fetch değil):
+    → fetch'te her istek için manuel header yönetimi gerekir.
+    → Axios interceptor: token ekleme bir kez tanımlanır,
+      her istek otomatik header alır.
+    → Response hatalarında daha okunabilir error objesi döner.
+
+  Tailwind CSS:
+    → Ayrı CSS dosyası yazmadan bileşen üzerinde stil uygulanır.
+    → className="flex items-center gap-4" → doğrudan utility sınıfları.
+    → Tasarım tutarlılığı: her renk, boşluk, radius scale'den geliyor.
+
+## KLASÖR YAPISI
+
+  frontend/
+    src/
+      App.jsx               → Uygulama giriş noktası, route tanımları
+      main.jsx              → React DOM'a bağlar
+      index.css             → Tailwind direktifleri
+      api/
+        axiosClient.js      → Axios instance + token interceptor
+      components/
+        ProtectedRoute.jsx  → Token kontrolü yapan guard bileşeni
+      layouts/
+        DashboardLayout.jsx → Sidebar + içerik alanı şablonu
+      pages/
+        LoginPage.jsx       → Giriş formu
+        DashboardPage.jsx   → Kullanıcı ve organizasyon bilgisi
+        DocumentsPage.jsx   → (Yer tutucu, henüz geliştirilmedi)
+        ChatPage.jsx        → (Yer tutucu, henüz geliştirilmedi)
+
+========================================================
+FRONTEND — api/axiosClient.js
+========================================================
+
+## NE YAPAR?
+
+Tüm API isteklerinde kullanılacak merkezi Axios örneği oluşturur.
+Token ekleme işini tek noktadan yönetir.
+
+## KOD ANALİZİ
+
+  const axiosClient = axios.create({
+    baseURL: "http://localhost:8000/api/v1",
+  });
+
+  → baseURL: her istekte tam URL yazmak yerine sadece
+    "/auth/login" gibi path yazılır.
+  → Backend port 8000'de çalışıyor (FastAPI).
+  → Prodüksiyona geçince bu URL environment variable olmalı
+    (örn: VITE_API_URL). Şu an hardcoded — geliştirme aşaması.
+
+  axiosClient.interceptors.request.use((config) => {
+    const token = localStorage.getItem("access_token");
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  });
+
+  → interceptors.request.use: her istek gönderilmeden önce çalışır.
+  → localStorage.getItem("access_token"): login sonrası kaydedilen JWT.
+  → Token varsa Authorization: Bearer <token> header'ı eklenir.
+  → Token yoksa header eklenmez — login sayfası gibi public
+    endpoint'ler hata almaz (backend zaten token gerektirmez).
+  → Bu interceptor olmadan her API çağrısında manuel header eklenmek
+    zorunda kalınırdı: 10 endpoint = 10 tekrar eden kod.
+
+## GÜVENLİK NOTU
+
+  localStorage kullanımı XSS saldırılarına karşı zayıf bir noktadır.
+  XSS ile kötü niyetli script token'ı okuyabilir.
+  Daha güvenli alternatif: httpOnly cookie (JavaScript erişemez).
+  Şu an geliştirme kolaylığı için localStorage tercih edilmiş.
+  Üretime geçmeden cookie tabanlı auth'a geçilmeli.
+
+========================================================
+FRONTEND — components/ProtectedRoute.jsx
+========================================================
+
+## NE YAPAR?
+
+Kimlik doğrulama gerektiren sayfaları token yoksa otomatik
+/login'e yönlendiren wrapper bileşeni.
+
+## KOD ANALİZİ
+
+  export default function ProtectedRoute({ children }) {
+    const token = localStorage.getItem("access_token");
+
+    if (!token) {
+      return <Navigate to="/login" replace />;
+    }
+
+    return children;
+  }
+
+  → localStorage'da "access_token" yoksa: /login'e yönlendir.
+  → replace: tarayıcı geçmişine bu yönlendirme eklenmez.
+    Kullanıcı "geri" tuşuna basınca korumalı sayfaya dönemez.
+  → Token varsa: children (korunan içerik) render edilir.
+
+  BASİT AMA YETERLİ NEDEN?
+  → Token varlığı kontrol ediliyor, geçerliliği değil.
+  → Süresi dolmuş token localStorage'da olsa da ProtectedRoute geçer.
+  → Gerçek geçerlilik kontrolü API isteği yapılınca backend'de olur:
+    401 döner → kullanıcı login'e yönlendirilebilir (henüz implemente değil).
+  → Tam uygulama için: token decode edip exp claim kontrol edilmeli
+    veya 401 response'u yakalayan response interceptor eklenmeli.
+
+## KULLANIM YERİ — App.jsx
+
+  <Route
+    element={
+      <ProtectedRoute>
+        <DashboardLayout />
+      </ProtectedRoute>
+    }
+  >
+    <Route path="/dashboard" element={<DashboardPage />} />
+    <Route path="/documents" element={<DocumentsPage />} />
+    <Route path="/chat"      element={<ChatPage />} />
+  </Route>
+
+  → Bir ProtectedRoute tüm korumalı sayfaları kapsar.
+  → DashboardLayout'un içine render olan tüm alt sayfalar
+    otomatik olarak korunmuş olur. Her sayfaya ayrı ayrı
+    ProtectedRoute sarmak gerekmez.
+
+========================================================
+FRONTEND — App.jsx — ROUTING YAPISI
+========================================================
+
+## KULLANILAN YAPI: BrowserRouter + Routes
+
+  <BrowserRouter>
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+
+      <Route element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+        <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/documents" element={<DocumentsPage />} />
+        <Route path="/chat"      element={<ChatPage />} />
+      </Route>
+
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+    </Routes>
+  </BrowserRouter>
+
+## ROUTE YAPISI NEDEN BÖYLE?
+
+  Layout Route (parent) + Alt Routelar (children):
+  → Ortak yapı (sidebar, nav) DashboardLayout'ta tek kez tanımlanır.
+  → Her sayfa sadece kendi içeriğini yazar, layout tekrar etmez.
+  → React Router v7'de Outlet bileşeni alt route'un nereye
+    render olacağını belirler. DashboardLayout içinde <Outlet />
+    vardır.
+
+  path="*" — Catch-all:
+  → Tanımlı olmayan herhangi bir URL → /dashboard'a yönlendirir.
+  → 404 göstermek yerine uygulama kullanıcıyı ana sayfaya götürür.
+  → replace: tarayıcı geçmişinde bilinmeyen URL kalmaz.
+
+  /login public, gerisi private:
+  → /login route'u ProtectedRoute dışında → token olmadan görünür.
+  → Diğer tüm route'lar ProtectedRoute içinde → token zorunlu.
+
+## SAYFA AKIŞI
+
+  Uygulama açılır → path "/" yoktur → "*" → /dashboard'a yönlendir
+  /dashboard → ProtectedRoute → token var mı?
+    → Hayır: /login'e yönlendir
+    → Evet: DashboardLayout render → DashboardPage içerik alanına
+
+========================================================
+FRONTEND — pages/LoginPage.jsx
+========================================================
+
+## NE YAPAR?
+
+Email + şifre ile giriş formunu render eder. Başarılı girişte
+JWT token'ı localStorage'a kaydeder ve /dashboard'a yönlendirir.
+
+## STATE YÖNETİMİ
+
+  const [email, setEmail]       = useState("testorg@example.com");
+  const [password, setPassword] = useState("1212123");
+  const [error, setError]       = useState("");
+  const [loading, setLoading]   = useState(false);
+
+  → email / password: kontrollü input (controlled component).
+    Input'un değeri her zaman state ile senkronize.
+  → error: API hata mesajı göstermek için.
+  → loading: buton disabled + metin değişimi için.
+  → useState("testorg@example.com"): geliştirme kolaylığı için
+    test kullanıcısı varsayılan olarak girilmiş. Prodüksiyonda
+    boş string olmalı.
+
+## GİRİŞ AKIŞI — handleLogin
+
+  event.preventDefault()
+    → Form submit → tarayıcı sayfayı yenilemesin.
+
+  const formData = new URLSearchParams();
+  formData.append("username", email);
+  formData.append("password", password);
+
+  → Backend OAuth2PasswordRequestForm bekliyor.
+  → OAuth2 standardı: login endpoint'i
+    application/x-www-form-urlencoded formatı alır. JSON değil.
+  → Alan adı "username" — email gelse de OAuth2 standardı böyle der.
+  → URLSearchParams: form-encoded data üretir.
+    {"username": "ali@x.com", "password": "123"} değil,
+    "username=ali%40x.com&password=123" formatı.
+
+  axiosClient.post("/auth/login", formData, {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+
+  → axiosClient varsayılan olarak JSON gönderir.
+  → Bu istek için Content-Type override ediliyor.
+  → Backend FastAPI OAuth2PasswordRequestForm ile doğru parse eder.
+
+  localStorage.setItem("access_token", response.data.access_token);
+  navigate("/dashboard");
+
+  → Token kaydedilir.
+  → useNavigate hook'u ile programatik yönlendirme.
+  → Sayfa reload olmaz, SPA geçişi yapılır.
+
+  catch → setError("Email veya şifre hatalı.")
+    → API'den gelen hata mesajı değil, kullanıcı dostu Türkçe mesaj.
+    → Gerçek hata loglanmıyor — production'da console.error eklenmeli.
+
+  finally → setLoading(false)
+    → Başarılı veya hatalı her durumda loading biter.
+    → finally olmadan hata durumunda buton sürekli disabled kalırdı.
+
+## UI YAPISI
+
+  Ortada konumlandırılmış kart (max-w-md):
+  → min-h-screen + flex items-center justify-center: dikey ortalama.
+  → bg-slate-100: sayfa arka planı.
+  → rounded-2xl + shadow: beyaz kart görünümü.
+
+  Form elemanları:
+  → type="email": tarayıcı email format validasyonu yapar.
+  → type="password": şifre maskelenir.
+  → required: boş bırakılamaz (HTML5 validasyonu).
+
+  Hata gösterimi:
+  → {error && <div>...}: error boş string iken gösterilmez.
+
+  Submit butonu:
+  → disabled={loading}: çift submit önlenir.
+  → {loading ? "Giriş yapılıyor..." : "Login"}: görsel feedback.
+
+========================================================
+FRONTEND — layouts/DashboardLayout.jsx
+========================================================
+
+## NE YAPAR?
+
+Sidebar navigasyon + sağda içerik alanı şablonu.
+Tüm korumalı sayfalarda kullanılan çerçeve düzeni.
+
+## LAYOUT YAPISI
+
+  fixed left-0 top-0 h-full w-64 → Sabit sol kenar çubuğu (264px)
+  ml-64 min-h-screen p-8         → İçerik alanı sidebar'ın sağında
+
+  Sidebar içeriği:
+    Başlık: "Enterprise RAG" + "Document Intelligence"
+    Navigasyon: Dashboard, Documents, Chat linkleri
+    Alt kısım: Logout butonu (sabit bottom-0)
+
+## NAVİGASYON LİNKLERİ
+
+  <Link to="/dashboard">Dashboard</Link>
+  <Link to="/documents">Documents</Link>
+  <Link to="/chat">Chat</Link>
+
+  → React Router Link: tarayıcı sayfayı yenilemez (SPA).
+  → <a href> kullansaydı her tıklamada sayfa yenilenir,
+    state kaybolurdu.
+  → hover:bg-slate-800: hover animasyonu Tailwind ile.
+
+## LOGOUT
+
+  const handleLogout = () => {
+    localStorage.removeItem("access_token");
+    navigate("/login");
+  };
+
+  → Token localStorage'dan silinir.
+  → /login'e yönlendirilir.
+  → Backend'e logout isteği gönderilmiyor — JWT stateless
+    olduğundan sunucu tarafında "oturumu kapat" kavramı yok.
+    Token süresi dolana kadar teknik olarak geçerli kalır.
+    (Blacklist mekanizması şu an yok — ileride Redis ile eklenebilir.)
+
+## OUTLET
+
+  <main className="ml-64 min
