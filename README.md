@@ -103,7 +103,6 @@ FastAPI Backend (:8000)
 ## Prerequisites
 
 - [Docker](https://www.docker.com/) and Docker Compose
-- [Node.js](https://nodejs.org/) 18+ (for local frontend development)
 - A [Google Gemini API key](https://aistudio.google.com/app/apikey)
 
 ---
@@ -144,33 +143,21 @@ CHAT_MODEL=gemini-2.0-flash
 UPLOAD_DIR=uploads
 ```
 
-### 3. Start the backend services
+### 3. Start everything
 
 ```bash
 docker compose up --build
 ```
 
-This starts:
-- `enterprise_rag_backend` — FastAPI API on port **8000**
-- `enterprise_rag_celery_worker` — Background document processor
+This starts all services in the correct order automatically:
 - `enterprise_rag_postgres` — PostgreSQL 16 + pgVector on port **5432**
+- `enterprise_rag_migrate` — Runs `alembic upgrade head`, then exits
+- `enterprise_rag_backend` — FastAPI API on port **8000** (starts after migrations)
+- `enterprise_rag_celery_worker` — Background document processor (starts after migrations)
 - `enterprise_rag_redis` — Redis 7 on port **6379**
+- `enterprise_rag_frontend` — React + Vite on port **5173**
 
-### 4. Run database migrations
-
-```bash
-docker compose exec backend alembic upgrade head
-```
-
-### 5. Start the frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend runs at **http://localhost:5173**
+That's it. Open **http://localhost:5173** in your browser.
 
 ---
 
@@ -344,7 +331,6 @@ FastAPI Backend (:8000)
 ## Gereksinimler
 
 - [Docker](https://www.docker.com/) ve Docker Compose
-- [Node.js](https://nodejs.org/) 18+ (yerel frontend geliştirme için)
 - [Google Gemini API anahtarı](https://aistudio.google.com/app/apikey)
 
 ---
@@ -385,33 +371,21 @@ CHAT_MODEL=gemini-2.0-flash
 UPLOAD_DIR=uploads
 ```
 
-### 3. Backend servislerini başlatın
+### 3. Herşeyi başlatın
 
 ```bash
 docker compose up --build
 ```
 
-Şu servisler başlar:
-- `enterprise_rag_backend` — FastAPI API, port **8000**
-- `enterprise_rag_celery_worker` — Arka plan doküman işleyici
+Tüm servisler doğru sırayla otomatik başlar:
 - `enterprise_rag_postgres` — PostgreSQL 16 + pgVector, port **5432**
+- `enterprise_rag_migrate` — `alembic upgrade head` otomatik çalışır, sonra kapanır
+- `enterprise_rag_backend` — FastAPI API, port **8000** (migration bittiğinde başlar)
+- `enterprise_rag_celery_worker` — Arka plan doküman işleyici (migration bittiğinde başlar)
 - `enterprise_rag_redis` — Redis 7, port **6379**
+- `enterprise_rag_frontend` — React + Vite, port **5173**
 
-### 4. Veritabanı migration'larını çalıştırın
-
-```bash
-docker compose exec backend alembic upgrade head
-```
-
-### 5. Frontend'i başlatın
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend **http://localhost:5173** adresinde çalışır.
+Hepsi bu. Tarayıcıda **http://localhost:5173** adresini açın.
 
 ---
 
@@ -486,225 +460,3 @@ curl http://localhost:8000/health
 { "status": "ok", "service": "Enterprise Document RAG Platform", "version": "0.1.0" }
 ```
 
-
----
-
-## Features
-
-### Authentication & Multi-Tenancy
-- User registration and JWT-based login
-- Organization/company structure with role separation (owner, member)
-- Organization-scoped document access and retrieval
-
-### Document Management
-- Upload PDF, DOCX, XLSX, and TXT files
-- Background processing via Celery workers
-- Track processing status (uploaded → processing → completed / failed)
-- Retry failed documents, delete documents
-- View extracted text chunks per document
-
-### AI / RAG Pipeline
-- Text extraction from PDF, DOCX, XLSX, TXT
-- Chunking with overlap for context preservation
-- Gemini Embeddings (`gemini-embedding-001`, 1536 dimensions)
-- pgVector semantic search scoped to the user's organization
-- Source-grounded answer generation with Gemini (`gemini-2.0-flash`)
-- Source metadata (file name, chunk index, page, similarity score) returned per answer
-
-### Chat System
-- Persistent chat sessions with full message history
-- Session list with titles
-- RAG-based answers with configurable Top-K retrieval
-
-### Admin & Usage Tracking
-- Usage logs for every action (upload, search, RAG chat, retry, etc.)
-- Admin summary metrics: total documents, chunks, sessions, messages, searches
-- Recent usage log table with action labels, user, organization, resource, and timestamp
-
-### Internationalization
-- Full Turkish / English UI toggle
-- Language preference persisted in localStorage
-- All pages fully translated (Login, Register, Dashboard, Documents, Chat, Admin)
-
----
-
-## Tech Stack
-
-| Layer | Technologies |
-|---|---|
-| **Backend** | FastAPI, SQLAlchemy, Alembic, Pydantic, Python-Jose (JWT), Passlib |
-| **Database** | PostgreSQL 16 + pgVector |
-| **Queue** | Redis + Celery |
-| **AI** | Google Gemini (embeddings + chat), pgVector similarity search |
-| **Document parsing** | pypdf, python-docx, openpyxl, pandas |
-| **Frontend** | React 19, Vite, TailwindCSS, Axios, React Router, i18next |
-| **Infrastructure** | Docker, Docker Compose |
-
----
-
-## Architecture
-
-```
-Browser (React + Vite :5173)
-        │
-        │ HTTP / JSON
-        ▼
-FastAPI Backend (:8000)
-        │
-        ├──► PostgreSQL + pgVector  (metadata, embeddings, chat history)
-        │
-        ├──► Redis                  (Celery task queue)
-        │
-        └──► Celery Worker          (document parsing, chunking, embedding)
-                    │
-                    └──► Gemini API (embeddings + chat completions)
-```
-
----
-
-## Prerequisites
-
-- [Docker](https://www.docker.com/) and Docker Compose
-- [Node.js](https://nodejs.org/) 18+ (for local frontend development)
-- A [Google Gemini API key](https://aistudio.google.com/app/apikey)
-
----
-
-## Setup
-
-### 1. Clone the repository
-
-```bash
-git clone <repo-url>
-cd enterprise-doc-rag-platform
-```
-
-### 2. Create the backend `.env` file
-
-Create `backend/.env` with the following variables:
-
-```env
-# Database
-DATABASE_URL=postgresql://rag_user:rag_password@postgres:5432/rag_db
-
-# Redis
-REDIS_URL=redis://redis:6379/0
-
-# JWT
-JWT_SECRET_KEY=your-secret-key-here
-JWT_ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=60
-
-# Gemini
-GEMINI_API_KEY=your-gemini-api-key-here
-EMBEDDING_PROVIDER=gemini
-EMBEDDING_MODEL=gemini-embedding-001
-EMBEDDING_DIMENSION=1536
-CHAT_MODEL=gemini-2.0-flash
-
-# Storage
-UPLOAD_DIR=uploads
-```
-
-### 3. Start the backend services
-
-```bash
-docker compose up --build
-```
-
-This starts:
-- `enterprise_rag_backend` — FastAPI API on port **8000**
-- `enterprise_rag_celery_worker` — Background document processor
-- `enterprise_rag_postgres` — PostgreSQL 16 + pgVector on port **5432**
-- `enterprise_rag_redis` — Redis 7 on port **6379**
-
-### 4. Run database migrations
-
-```bash
-docker compose exec backend alembic upgrade head
-```
-
-### 5. Start the frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend runs at **http://localhost:5173**
-
----
-
-## Usage
-
-1. Open **http://localhost:5173** in your browser
-2. Register a new account (this also creates your organization)
-3. Log in and navigate to **Documents** to upload files
-4. Wait for processing status to become **Completed**
-5. Go to **Chat** and ask questions about your documents
-6. Answers include source references (file name, page, similarity score)
-
----
-
-## API
-
-Interactive API docs are available at **http://localhost:8000/docs** (Swagger UI).
-
-Key endpoint groups:
-
-| Prefix | Description |
-|---|---|
-| `POST /api/v1/auth/register` | Register a new user + organization |
-| `POST /api/v1/auth/login` | Login, receive JWT token |
-| `GET /api/v1/users/me` | Current user info |
-| `GET/POST /api/v1/documents` | List and upload documents |
-| `POST /api/v1/documents/{id}/retry` | Retry failed document |
-| `GET /api/v1/documents/{id}/chunks` | View extracted chunks |
-| `POST /api/v1/chat` | Send a RAG chat message |
-| `GET /api/v1/chat/sessions` | List chat sessions |
-| `GET /api/v1/chat/sessions/{id}` | Get session with messages |
-| `GET /api/v1/admin/usage/summary` | Admin usage metrics |
-| `GET /api/v1/admin/usage/logs` | Admin usage log table |
-
----
-
-## Project Structure
-
-```
-enterprise-doc-rag-platform/
-├── docker-compose.yml
-├── backend/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── alembic/               # Database migrations
-│   └── app/
-│       ├── main.py
-│       ├── api/v1/            # API route handlers
-│       ├── core/              # Config, security (JWT)
-│       ├── db/                # SQLAlchemy session & base
-│       ├── models/            # ORM models
-│       ├── schemas/           # Pydantic schemas
-│       ├── services/          # Business logic
-│       └── workers/           # Celery tasks
-└── frontend/
-    └── src/
-        ├── api/               # Axios client
-        ├── components/        # Shared UI components
-        ├── i18n/locales/      # en.json, tr.json translations
-        ├── layouts/           # DashboardLayout
-        └── pages/             # LoginPage, RegisterPage, Dashboard,
-                               # DocumentsPage, ChatPage, AdminUsagePage
-```
-
----
-
-## Health Check
-
-```bash
-curl http://localhost:8000/health
-```
-
-```json
-{ "status": "ok", "service": "Enterprise Document RAG Platform", "version": "0.1.0" }
-```
