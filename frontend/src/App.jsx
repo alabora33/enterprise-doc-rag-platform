@@ -6,12 +6,15 @@ import DashboardPage from "./pages/DashboardPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import ChatPage from "./pages/ChatPage";
 import AdminUsagePage from "./pages/AdminUsagePage";
+import RegisterPage from "./pages/RegisterPage";
 
 function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+
 
         <Route
           element={
@@ -25,6 +28,7 @@ function App() {
           <Route path="/documents" element={<DocumentsPage />} />
           <Route path="/chat" element={<ChatPage />} />
         </Route>
+
 
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

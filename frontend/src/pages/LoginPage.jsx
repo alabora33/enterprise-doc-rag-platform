@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import axiosClient from "../api/axiosClient";
 
@@ -104,7 +104,12 @@ export default function LoginPage() {
             {loading ? t("login.loggingIn") : t("login.loginButton")}
           </button>
         </form>
-
+        <p className="mt-6 text-center text-sm text-slate-500">
+           Hesabın yok mu?{" "}
+          <Link to="/register" className="font-medium text-slate-900 underline">
+            Register
+          </Link>
+        </p>  
         <div className="mt-6 flex justify-center">
           <button
             onClick={toggleLanguage}
