@@ -2358,3 +2358,487 @@ SONRAKİ ADIMLAR (Planlanmış)
      from app.models.document_chunk import DocumentChunk eklenecek.
 
 ========================================================
+========================================================
+COMMIT: "Add embedding, semantic search and RAG chat pipeline"
+— EMBEDDING, SEMANTİK ARAMA VE RAG CHAT KATMANININ EKLENMESİ
+========================================================
+
+Bu commit ile RAG pipeline'ının son ve en kritik aşaması tamamlandı.
+Artık sistem dokümanları anlıyor, sorular sorabiliyor ve kaynaklı
+cevap üretebiliyor.
+
+Etkilenen dosyalar (migration hariç):
+  GÜNCELLEME : core/config.py
+  GÜNCELLEME : models/document_chunk.py   (embedding kolonu eklendi)
+  GÜNCELLEME : services/document_processing_service.py
+  GÜNCELLEME : api/v1/router.py
+  YENİ       : services/embedding_service.py
+  YENİ       : services/semantic_search_service.py
+  YENİ       : services/llm_service.py
+  YENİ       : services/rag_service.py
+  YENİ       : schemas/search.py
+  YENİ       : schemas/chat.py
+  YENİ       : api/v1/search.py
+  YENİ       : api/v1/chat.py
+  YENİ       : alembic/versions/7914a55ba2b2_add_embedding_column...
+
+========================================================
+CORE/CONFIG.PY — GÜNCELLEME: GEMİNİ AYARLARI EKLENDİ
+========================================================
+
+Yeni alanlar:
+
+  EMBEDDING_PROVIDER: str = "gemini"
+    → Gelecekte "openai" gibi başka provider'a geçiş için.
+      Şu an sadece "gemini" destekleniyor.
+
+  GEMINI_API_KEY: str | None = None
+    → Google Gemini API anahtarı. .env'den okunur.
+    → None olabilir: embedding servisi başlarken kontrol eder,
+      eksikse ValueError fırlatır, uygulama anlamlı hata verir.
+
+  EMBEDDING_MODEL: str = "gemini-embedding-001"
+    → Embedding üretmek için kullanılan Gemini modeli.
+
+  EMBEDDING_DIMENSION: int = 1536
+    → Üretilen vektörün boyutu.
+    → pgvector'da Vector(1536) ile BİREBİR uyumlu olmalı.
+    → Bu iki değer farklı olursa vektörler DB'ye yazılamaz.
+
+  CHAT_MODEL: str = "gemini-2.0-flash"
+    → Soru-cevap için kullanılan LLM modeli.
+    → config'den okunduğu için model değişimi tek satır.
+
+  NOT: .env dosyasında CHAT_MODEL=gemini-3.1-flash-lite yazıyor.
+    Bu model adı geçersiz. Doğrusu "gemini-2.0-flash".
+    .env düzeltilmezse runtime'da Gemini API hata verir.
+    config.py default'u doğru, .env güncellenmeli.
+
+========================================================
+SERVICES/EMBEDDING_SERVICE.PY — YENİ: EMBEDDING SERVİSİ
+========================================================
+
+## GENEL AMAÇ
+Metin → vektör (list[float]) dönüşümünü yönetir.
+Google Gemini API kullanarak hem tekil hem toplu embedding üretir.
+
+## get_gemini_client() → genai.Client
+  Gemini API istemcisini oluşturur.
+  Anahtarsız çağrılırsa ValueError fırlatır — erken hata tespiti.
+  Her çağrıda yeni client oluşturulur (bağlantı havuzu değil).
+
+## create_embedding(text) → list[float]
+  Tek bir metin için 1536 boyutlu vektör döner.
+  Kullanım yeri: semantic_search_service.py — kullanıcı sorgusunu
+  vektöre çevirirken.
+
+  client.models.embed_content(
+      model=settings.EMBEDDING_MODEL,
+      contents=text,
+      config=types.EmbedContentConfig(
+          output_dimensionality=settings.EMBEDDING_DIMENSION,
+      ),
+  )
+
+  output_dimensionality neden önemli?
+    → Gemini modeli farklı boyutlarda vektör üretebilir.
+      Biz 1536 istiyoruz çünkü DB'deki Vector(1536) ile
+      uyumsuzluk olursa vektör yazılamaz/okunamaz.
+    → Config'den okunuyor: boyut değiştirilmek istenirse
+      tek yerden ayarlanır.
+
+## create_embeddings(texts) → list[list[float]]
+  Birden fazla metni tek API çağrısında toplu işler.
+  Kullanım yeri: document_processing_service.py — tüm chunk'ları
+  tek seferde vektörleştirirken.
+
+  Neden toplu?
+    → 500 chunk olan bir doküman için 500 ayrı API çağrısı yerine
+      tek çağrı. Hem maliyet hem süre dramatik şekilde azalır.
+    → texts boşsa API çağrısı yapılmaz, boş liste döner.
+      (Gereksiz ağ trafiği önlenir.)
+
+========================================================
+MODELS/DOCUMENT_CHUNK.PY — GÜNCELLEME: EMBEDDING KOLONU
+========================================================
+
+Modele eklenen tek alan:
+
+  embedding: Mapped[list[float] | None] = mapped_column(
+      Vector(1536),
+      nullable=True,
+  )
+
+  pgvector.sqlalchemy.Vector tipi kullanıldı.
+    → pgvector PostgreSQL eklentisinin SQLAlchemy bağlayıcısı.
+    → Vector(1536): 1536 float'tan oluşan sabit boyutlu vektör.
+
+  nullable=True neden?
+    → Migration sırasında mevcut chunk'lar embedding olmadan
+      kalır, sistem çökmez.
+    → semantic_search_service.py embedding.isnot(None) filtresi
+      ile embedding'siz chunk'ları aramadan dışlar.
+
+========================================================
+MİGRASYON: 7914a55ba2b2 — EMBEDDING KOLONU EKLENDİ
+========================================================
+
+  Revision    : 7914a55ba2b2
+  Revises     : af7df02fecaa (document_chunks tablosu migration'ı)
+  Create Date : 2026-05-18
+
+  upgrade():
+    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+      → pgvector eklentisini aktif eder.
+      → IF NOT EXISTS: zaten yüklüyse hata vermez.
+      → Bu komut olmadan Vector tipi PostgreSQL'de çalışmaz.
+
+    op.add_column("document_chunks", Column("embedding", Vector(1536)))
+      → Mevcut tabloya yeni kolon eklenir.
+      → nullable=True: mevcut satırlarda NULL olarak kalır.
+
+  downgrade():
+    op.drop_column("document_chunks", "embedding")
+      → Kolonu kaldırır. Eklenti kaldırılmaz (başka tablolar
+        da kullanıyor olabilir).
+
+  Komutlar:
+    alembic revision --autogenerate -m "add embedding column..."
+    alembic upgrade head
+
+========================================================
+SERVICES/DOCUMENT_PROCESSING_SERVICE.PY — GÜNCELLEME
+========================================================
+
+## DEĞİŞEN KISIM: embedding üretimi eklendi
+
+Önceki hal:
+  parse → chunk → DB'ye yaz
+
+Yeni hal:
+  parse → chunk → embedding üret → DB'ye yaz
+
+Eklenen satırlar:
+
+  chunk_texts = [chunk["content"] for chunk in chunks]
+  embeddings = create_embeddings(chunk_texts)
+
+  Neden önceden toplanıp tek çağrı?
+    → Her chunk için ayrı create_embedding() çağırmak yerine
+      tüm chunk içerikleri liste halinde toplandı, tek API çağrısı.
+    → 100 chunk = 100 API çağrısı (eski) → 1 API çağrısı (yeni).
+
+  DocumentChunk oluşturulurken:
+    embedding=embeddings[index]   ← YENİ
+    → index ile chunk ve embeddings listesi senkronize.
+    → create_embeddings() sırayı korur: embeddings[0] chunks[0]'a ait.
+
+  Hata yönetimi değişmedi:
+    → API hatası (geçersiz key, kota aşımı) exception fırlatır.
+    → except Exception bloğu yakalar, rollback + status=FAILED.
+
+========================================================
+SERVICES/SEMANTIC_SEARCH_SERVICE.PY — YENİ: SEMANTİK ARAMA
+========================================================
+
+## GENEL AMAÇ
+Kullanıcının metin sorgusunu vektöre çevirir, pgvector'da en
+benzer chunk'ları bulur, formatlanmış sonuçları döner.
+
+## semantic_search_chunks(db, organization_id, query, top_k=5)
+
+ADIM 1 — Sorguyu vektörleştir:
+  query_embedding = create_embedding(query)
+    → Kullanıcı ne yazarsa yazsın, aynı embedding modeli kullanılır.
+    → Dokümanlar da aynı modelle vektörleştirildiği için
+      "elma" sorgusu "meyve" içerikli chunk'ı bulabilir (semantik).
+
+ADIM 2 — Cosine distance hesapla:
+  distance = DocumentChunk.embedding.cosine_distance(query_embedding)
+    → pgvector'ın SQLAlchemy operatörü. SQL'de <=> operatörüne karşılık.
+    → Cosine distance: 0 = özdeş, 2 = tam zıt.
+    → Neden cosine? Metin embedding'lerinde vektör büyüklüğü değil
+      yönü önemli. Cosine açı ölçer, büyüklükten bağımsız çalışır.
+      Euclidean distance metin benzerliğinde daha kötü sonuç verir.
+
+ADIM 3 — Filtreli sorgu:
+  db.query(DocumentChunk, Document.original_file_name, distance)
+    .join(Document, Document.id == DocumentChunk.document_id)
+    .filter(
+        DocumentChunk.organization_id == organization_id,  ← tenant isolation
+        DocumentChunk.embedding.isnot(None),               ← embedding'siz atla
+    )
+    .order_by(distance)   ← en benzer önce
+    .limit(top_k)
+
+  Tenant isolation neden kritik?
+    → organization_id filtresi olmasaydı kullanıcı başka
+      şirketin dokümanlarında arama yapabilirdi.
+    → Bu filtre her aramada çalışır, bypass edilemez.
+
+  .isnot(None) neden?
+    → embedding=NULL olan chunk'larla cosine_distance hesaplanamaz,
+      DB hatası fırlatır. Filtre ile bu chunk'lar tamamen dışlanır.
+
+ADIM 4 — Similarity score dönüşümü:
+  similarity_score = 1 - float(distance_value)
+    → Cosine distance (0-2) → 1'den çıkarınca (1 ile -1 arası)
+    → Tam benzer chunk yaklaşık 1.0, alakasız chunk 0'a yakın değer
+    → UI'da gösterilmesi için sezgisel: yüksek = benzer
+
+ADIM 5 — Dict formatında dön:
+  ORM nesnesi değil dict döner.
+    → response şemasıyla birebir uyumlu.
+    → JSON serialize sırasında ORM detachment hatası olmaz.
+    → search.py ve rag_service.py her ikisi de bu dict'i kullanır.
+
+========================================================
+SCHEMAS/SEARCH.PY — YENİ: ARAMA ŞEMALARI
+========================================================
+
+## SearchRequest
+  query: str = Field(min_length=2, max_length=1000)
+    → Çok kısa arama önlenir. 1000 karakter üstü gereksiz API yükü.
+  top_k: int = Field(default=5, ge=1, le=20)
+    → Kaç sonuç dönsün. 1-20 arası kısıt: 0 veya 1000 istenemez.
+
+## SearchResult
+  document_id, original_file_name, chunk_id, chunk_index
+  content, page_number, sheet_name, source_type, similarity_score
+
+  Neden content var?
+    → Arama ekranında eşleşen chunk içeriği önizleme olarak gösterilir.
+    → Chat endpoint'inde content RAG context'e dahil edilir.
+
+========================================================
+API/V1/SEARCH.PY — YENİ: SEMANTİK ARAMA ENDPOINT'İ
+========================================================
+
+POST /api/v1/search
+  request : SearchRequest (body)
+  response: list[SearchResult]
+
+  Akış:
+    1. get_current_user()                        → kimlik doğrulama
+    2. get_current_user_primary_organization_id() → hangi org?
+    3. semantic_search_chunks(db, org_id, query, top_k)
+    4. list[SearchResult] → response
+
+  Neden ayrı endpoint (chat'ten bağımsız)?
+    → Kullanıcı "hangi dokümanlar bu konudan bahsediyor?" diye
+      cevap üretmeden sadece chunk aramak isteyebilir.
+    → Test ve debug için: embedding kalitesini chat olmadan ölçmek.
+    → Frontend'de "Bu konu hangi dosyalarda geçiyor?" widget'ı.
+
+========================================================
+SERVICES/LLM_SERVICE.PY — YENİ: LLM (DİL MODELİ) SERVİSİ
+========================================================
+
+## GENEL AMAÇ
+Arama sonuçlarından oluşturulan context metni ve kullanıcı sorusunu
+Gemini'ye gönderir, Türkçe cevap üretir.
+
+## generate_answer_with_context(question, context) → str
+
+  Prompt tasarımı:
+    "Sen kurumsal dokümanlar üzerinde çalışan bir RAG asistanısın."
+    → Sistem rolü açıkça tanımlandı.
+
+    "Sadece verilen kaynak metinlere dayanarak cevap ver."
+    → Hallüsinasyon engeli: LLM kendi bilgisinden uydurma yapamaz.
+
+    "Kaynaklarda bilgi yoksa 'Bu bilgi verilen dokümanlarda
+     bulunamadı.' de."
+    → Sabit geri dönüş metni → UI bu cevabı tespit edip
+      farklı gösterebilir.
+
+    "Uydurma bilgi ekleme."
+    → RAG prensibi: LLM sadece verilen context'i yorumlar.
+
+  Neden Türkçe prompt?
+    → Hedef kullanıcılar Türkçe doküman yükleyecek.
+    → Gemini Türkçe promptu anlıyor, Türkçe cevap üretiyor.
+    → İleride dil config'den yönetilebilir.
+
+  response.text or "Cevap üretilemedi."
+    → Gemini boş response döndürdüğünde güvenli fallback.
+
+========================================================
+SERVICES/RAG_SERVICE.PY — YENİ: RAG ORKESTRATÖRü
+========================================================
+
+## GENEL AMAÇ
+Semantic search + context oluşturma + LLM çağrısını koordine eder.
+Chat endpoint'i sadece bu servisi çağırır, detayları bilmez.
+
+## build_context_from_search_results(search_results) → str
+
+  Her chunk için:
+    [Kaynak 1]
+    Dosya: rapor.pdf | Tür: pdf | Sayfa: 5
+    İçerik:
+    ...metin...
+
+    ---
+
+    [Kaynak 2]
+    ...
+
+  Neden bu format?
+    → LLM her kaynağın hangi dosyadan geldiğini görerek
+      "Kaynak 1'de belirtildiği üzere..." diyebilir.
+    → Sayfa/sheet bilgisi → LLM cevabında kaynak atıfı yapabilir.
+    → "---" ayırıcı → kaynaklar arası sınır net.
+
+## answer_question_with_rag(db, organization_id, question, top_k=5)
+
+  ADIM 1: semantic_search_chunks() → chunk'ları bul
+  ADIM 2: search_results boşsa → LLM'e gitmeden erken dön
+    → "Bu bilgi verilen dokümanlarda bulunamadı."
+    → Neden? Boş context'le LLM'e gidilirse hallüsinasyon riski.
+      Gereksiz API çağrısı ve maliyet de önlenir.
+  ADIM 3: build_context_from_search_results() → context metni
+  ADIM 4: generate_answer_with_context() → LLM cevabı
+  ADIM 5: sources listesi hazırla (chunk metadata'sı)
+  ADIM 6: {"answer": ..., "sources": [...]} döndür
+
+  sources neden ayrı döndürülüyor?
+    → Frontend "Bu cevap şu dosyanın şu sayfasından geldi"
+      bilgisini gösterir → kullanıcı doğrulamak isterse
+      orjinal dokümana bakabilir.
+    → similarity_score da sources içinde → UI güven skoru gösterebilir.
+
+========================================================
+SCHEMAS/CHAT.PY — YENİ: CHAT ŞEMALARI
+========================================================
+
+## ChatRequest
+  question: str = Field(min_length=2, max_length=2000)
+    → Aramadan farklı olarak 2000 karakter: soru daha uzun olabilir.
+  top_k: int = Field(default=5, ge=1, le=20)
+    → Kaç kaynak chunk LLM'e verilsin.
+    → Fazla chunk: daha fazla bilgi ama daha uzun/pahalı prompt.
+    → Az chunk: hızlı ama bilgi eksik kalabilir. 5 makul denge.
+
+## ChatSource
+  document_id, original_file_name, chunk_id, chunk_index
+  page_number, sheet_name, source_type, similarity_score
+    → UI'da her cevabın altında "kaynaklar" bölümü için.
+
+## ChatResponse
+  answer: str
+    → LLM'in ürettiği Türkçe cevap.
+  sources: list[ChatSource]
+    → Cevabı destekleyen chunk'ların listesi.
+
+========================================================
+API/V1/CHAT.PY — YENİ: CHAT ENDPOINT'İ
+========================================================
+
+POST /api/v1/chat
+  request : ChatRequest (body)
+  response: ChatResponse
+
+  Akış:
+    1. get_current_user()                        → kimlik doğrulama
+    2. get_current_user_primary_organization_id() → hangi org?
+    3. answer_question_with_rag(db, org_id, question, top_k)
+    4. ChatResponse → response
+
+  answer_question_with_rag() dict döndürür, ChatResponse bunu
+  otomatik serialize eder (FastAPI response_model özelliği).
+
+  Neden iş mantığı endpoint'te değil service'te?
+    → Chat endpoint sadece HTTP koordinasyonu yapar.
+    → RAG mantığı (search → context → LLM) rag_service.py'da.
+    → Test: rag_service unit test edilebilir, HTTP katmanı mock'lanır.
+    → Celery: ileride chat işlemi arka plana alınmak istenirse
+      endpoint değil sadece service taşınır.
+
+========================================================
+API/V1/ROUTER.PY — GÜNCELLEME
+========================================================
+
+Önceki hal:
+  from app.api.v1 import auth, users, organizations, documents
+  (search ve chat yoktu)
+
+Yeni hal:
+  from app.api.v1 import auth, users, organizations, documents, search, chat
+  api_router.include_router(search.router)
+  api_router.include_router(chat.router)
+
+GÜNCEL URL TABLOSU (tüm sistem):
+  POST /api/v1/auth/register              → kayıt
+  POST /api/v1/auth/login                 → giriş
+  GET  /api/v1/users/me                   → profil (token gerekli)
+  GET  /api/v1/organizations/me           → organizasyonlar (token gerekli)
+  POST /api/v1/documents/upload           → dosya yükle (token gerekli)
+  GET  /api/v1/documents                  → dosya listesi (token gerekli)
+  GET  /api/v1/documents/{id}             → dosya detayı (token gerekli)
+  GET  /api/v1/documents/{id}/chunks      → chunk listesi (token gerekli)
+  POST /api/v1/search                     → semantik arama (token gerekli)
+  POST /api/v1/chat                       → RAG soru-cevap (token gerekli)
+
+========================================================
+TAM RAG PIPELINE AKIŞI — BÜYÜK RESİM (SİSTEM TAMAMLANDI)
+========================================================
+
+DOKÜMAN YÜKLEME:
+  POST /documents/upload + Bearer <token>
+        ↓
+  parse_document()           → sections (PDF: sayfa, Excel: sheet)
+        ↓
+  create_chunks_from_sections() → chunk dict listesi (overlap=200)
+        ↓
+  create_embeddings(chunk_texts) → Gemini API → list[list[float]]
+        ↓
+  DocumentChunk(..., embedding=...) → DB'ye kayıt (status=COMPLETED)
+
+ARAMA:
+  POST /search {"query": "fesih şartları", "top_k": 5}
+        ↓
+  create_embedding(query)    → Gemini API → query vektörü
+        ↓
+  cosine_distance sorgusu    → pgvector <=> operatörü
+        ↓
+  organization_id filtreli   → sadece kendi org'un chunk'ları
+        ↓
+  list[SearchResult]         → similarity_score ile sıralı
+
+SORU-CEVAP:
+  POST /chat {"question": "Bu sözleşmede fesih şartları nelerdir?"}
+        ↓
+  semantic_search_chunks()   → top_k benzer chunk
+        ↓
+  build_context_from_search_results()
+        ↓
+  [Kaynak 1] Dosya: contract.pdf | Sayfa: 12 | İçerik: ...
+  [Kaynak 2] ...
+        ↓
+  generate_answer_with_context() → Gemini gemini-2.0-flash
+        ↓
+  {
+    "answer": "Madde 8.2'ye göre taraflar 30 gün önceden...",
+    "sources": [{"original_file_name": "contract.pdf",
+                  "page_number": 12,
+                  "similarity_score": 0.94, ...}]
+  }
+
+GÜVENLİK ÖZETİ (bu commit):
+  - Tenant isolation: her embedding araması organization_id filtreli
+  - Hallüsinasyon engeli: LLM sadece verilen context'e cevap verir
+  - Boş context kontrolü: chunk bulunamazsa LLM'e hiç gidilmez
+  - API key doğrulama: eksikse uygulama başlamadan ValueError
+
+TEKNIK BORÇ / SONRAKI ADIMLAR:
+  - .env'deki CHAT_MODEL=gemini-3.1-flash-lite geçersiz model adı,
+    "gemini-2.0-flash" olarak düzeltilmeli.
+  - Celery entegrasyonu: embedding üretimi (büyük dosyalar için)
+    arka plana alınmalı, şu an senkron çalışıyor.
+  - Chunk overlap ve boyutu (1200/200) RAG kalitesine göre
+    tune edilebilir, config'e taşınabilir.
+  - LLM prompt dili config'e alınabilir (Türkçe/İngilizce).
+  - Token kullanım takibi: Gemini API harcamasını DB'ye yazma.
+
+========================================================
