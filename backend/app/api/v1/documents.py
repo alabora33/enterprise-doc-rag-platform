@@ -10,6 +10,7 @@ from app.services.document_service import (
     create_document_record,
     get_document_by_id_and_organization,
     get_documents_by_organization,
+    delete_document,
 )
 from app.services.organization_service import get_user_organizations
 
@@ -246,3 +247,36 @@ def retry_document_processing(
     db.refresh(document)
 
     return document
+
+@router.delete(
+    "/{document_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_document_endpoint(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    organization_id = get_current_user_primary_organization_id(
+        db,
+        user_id=current_user.id,
+    )
+
+    document = get_document_by_id_and_organization(
+        db,
+        document_id=document_id,
+        organization_id=organization_id,
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    delete_document(
+        db=db,
+        document=document,
+    )
+
+    return None

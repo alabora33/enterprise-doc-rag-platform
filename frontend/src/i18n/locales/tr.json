@@ -1,0 +1,103 @@
+{
+  "common": {
+    "cancel": "Vazgeç",
+    "delete": "Sil"
+  },
+  "login": {
+    "title": "Enterprise Document RAG",
+    "subtitle": "Kurumsal doküman zekâ platformuna giriş yap",
+    "emailLabel": "E-posta",
+    "passwordLabel": "Şifre",
+    "loginButton": "Giriş Yap",
+    "loggingIn": "Giriş yapılıyor...",
+    "invalidCredentials": "E-posta veya şifre hatalı."
+  },
+  "nav": {
+    "dashboard": "Kontrol Paneli",
+    "documents": "Dokümanlar",
+    "chat": "Sohbet",
+    "logout": "Çıkış Yap",
+    "appSubtitle": "Doküman Zekâsı"
+  },
+  "dashboard": {
+    "title": "Kontrol Paneli",
+    "subtitle": "Kurumsal doküman zekâ platformu yönetim paneli.",
+    "userCard": {
+      "title": "Kullanıcı",
+      "email": "E-posta",
+      "name": "Ad",
+      "superuser": "Süper Kullanıcı",
+      "yes": "Evet",
+      "no": "Hayır",
+      "loading": "Yükleniyor..."
+    },
+    "orgCard": {
+      "title": "Organizasyonlar",
+      "role": "Rol"
+    }
+  },
+  "documents": {
+    "title": "Dokümanlar",
+    "subtitle": "Kurumsal dokümanları yükle, işleme durumunu takip et ve oluşturulan metin parçalarını görüntüle.",
+    "refreshButton": "Yenile",
+    "uploadCard": {
+      "title": "Doküman Yükle",
+      "description": "PDF, DOCX, XLSX veya TXT dosyası yükleyebilirsin.",
+      "fileLabel": "Dosya",
+      "selectedFile": "Seçilen",
+      "uploadButton": "Yükle",
+      "uploading": "Yükleniyor..."
+    },
+    "listCard": {
+      "title": "Doküman Listesi",
+      "loading": "Yükleniyor...",
+      "colFile": "Dosya",
+      "colStatus": "Durum",
+      "colSize": "Boyut",
+      "colActions": "İşlemler",
+      "empty": "Henüz doküman yüklenmedi.",
+      "idLabel": "No",
+      "statusBtn": "Durum",
+      "chunksBtn": "Parçalar",
+      "retryBtn": "Tekrar Dene",
+      "deleteBtn": "Sil",
+      "note": "Not: Yükleme sonrası doküman önce <b>Yüklendi</b> görünebilir. Celery worker işledikten sonra <b>Tamamlandı</b> olur."
+    },
+    "statuses": {
+      "uploaded": "Yüklendi",
+      "processing": "İşleniyor",
+      "completed": "Tamamlandı",
+      "failed": "Başarısız"
+    },
+    "chunksPanel": {
+      "title": "Metin Parçaları",
+      "description": "Dokümandan çıkarılan metin parçaları.",
+      "loading": "Parçalar yükleniyor...",
+      "empty": "Metin parçası bulunamadı. Doküman hâlâ işleniyor olabilir veya metin çıkarılamamış olabilir.",
+      "closeButton": "Kapat",
+      "chunkLabel": "Parça #",
+      "typeLabel": "Tür",
+      "pageLabel": "Sayfa",
+      "sheetLabel": "Sayfa Adı"
+    },
+    "errors": {
+      "fetchDocuments": "Dokümanlar alınırken hata oluştu.",
+      "noFileSelected": "Lütfen bir dosya seç.",
+      "uploadFailed": "Dosya yüklenirken hata oluştu.",
+      "retryFailed": "Doküman yeniden işleme alınırken hata oluştu.",
+      "refreshStatusFailed": "Doküman durumu güncellenirken hata oluştu.",
+      "fetchChunksFailed": "Metin parçaları alınırken hata oluştu.",
+      "deleteFailed": "Doküman silinirken hata oluştu.",
+      "deleteProcessing": "İşlenmekte olan doküman silinemez."
+    },
+    "deleteConfirm": "Bu dokümanı silmek istediğine emin misin?",
+    "deleteConfirmTitle": "Dokümanı Sil",
+    "deleteSuccess": "Doküman başarıyla silindi.",
+    "uploadSuccess": "Doküman başarıyla yüklendi.",
+    "retrySuccess": "Doküman yeniden işlemeye alındı."
+  },
+  "chat": {
+    "title": "Sohbet",
+    "subtitle": "RAG tabanlı doküman sohbet ekranı burada olacak."
+  }
+}

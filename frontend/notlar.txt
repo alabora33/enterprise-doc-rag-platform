@@ -244,6 +244,407 @@ JWT token'ı localStorage'a kaydeder ve /dashboard'a yönlendirir.
 
   → Token kaydedilir.
   → useNavigate hook'u ile programatik yönlendirme.
+
+========================================================
+FRONTEND — ÇOKLU DİL DESTEĞİ (i18n) — react-i18next
+========================================================
+
+## NEDEN GEREKTİ?
+Uygulama Türkçe ve İngilizce olarak kullanılacak.
+Tüm UI metinlerini kod içinde sabit yazmak yerine
+çeviri dosyalarından okumak hem sürdürülebilirliği
+hem de dil ekleme esnekliğini sağlar.
+
+## KULLANILAN KÜTÜPHANELERi
+  react-i18next  : React hook entegrasyonu (useTranslation)
+  i18next        : Çeviri altyapısı
+
+  Kurulum:
+    npm install react-i18next i18next
+
+## DOSYA YAPISI
+
+  src/
+    i18n/
+      i18n.js                → i18next konfigürasyonu
+      locales/
+        tr.json              → Türkçe çeviriler
+        en.json              → İngilizce çeviriler
+
+## i18n/i18n.js
+
+  import i18n from "i18next";
+  import { initReactI18next } from "react-i18next";
+  import tr from "./locales/tr.json";
+  import en from "./locales/en.json";
+
+  const savedLanguage = localStorage.getItem("language") || "tr";
+
+  i18n.use(initReactI18next).init({
+    resources: { en: { translation: en }, tr: { translation: tr } },
+    lng: savedLanguage,
+    fallbackLng: "tr",
+    interpolation: { escapeValue: false },
+  });
+
+  → localStorage "language" anahtarı ile dil tercihi kalıcı.
+  → Sayfa yenilense bile kullanıcının seçtiği dil korunur.
+  → fallbackLng: çeviri anahtarı bulunamazsa Türkçe'ye düşer.
+
+## ÇEVIRI DOSYASI YAPISI (tr.json / en.json)
+
+  Hiyerarşik anahtar-değer yapısı:
+  {
+    "common":    { "cancel": "Vazgeç", "delete": "Sil", ... },
+    "login":     { "title": "Giriş Yap", ... },
+    "nav":       { "dashboard": "Kontrol Paneli", ... },
+    "dashboard": { ... },
+    "documents": {
+      "listCard":   { ... },
+      "uploadCard": { ... },
+      "chunksPanel":{ ... },
+      "statuses":   {
+        "uploaded":   "Yüklendi",
+        "processing": "İşleniyor",
+        "completed":  "Tamamlandı",
+        "failed":     "Başarısız"
+      },
+      "errors":     { ... }
+    },
+    "chat": { ... }
+  }
+
+  Durum çevirisi:
+    t(`documents.statuses.${document.status}`) || document.status
+    → Bilinmeyen status gelirse ham değeri gösterir.
+
+## BILEŞENLERDE KULLANIM
+
+  import { useTranslation } from "react-i18next";
+  const { t, i18n } = useTranslation();
+
+  <h1>{t("documents.title")}</h1>
+  → tr seçiliyse "Dokümanlar"
+  → en seçiliyse "Documents"
+
+## DİL DEĞİŞTİRME — toggleLanguage
+
+  Hem LoginPage.jsx hem DashboardLayout.jsx'te aynı mantık:
+
+  const toggleLanguage = () => {
+    const newLang = i18n.language === "tr" ? "en" : "tr";
+    i18n.changeLanguage(newLang);
+    localStorage.setItem("language", newLang);
+  };
+
+  → i18n.changeLanguage() tüm useTranslation hook'larını
+    anında günceller, sayfa yenilemesi gerekmez.
+  → localStorage'a kaydedilir → sayfa kapanıp açılsa da korunur.
+
+## DİL DÜĞMESI — BAYRAK EMOJİ SORUNU VE ÇÖZÜM
+
+  Windows işletim sistemi ülke bayrağı emojilerini (🇹🇷, 🇬🇧)
+  desteklemiyor. Gösterildiğinde "tr", "us" gibi 2 harfli kod
+  çıkıyor.
+
+  ÇÖZÜM: Bayrak emoji yerine SVG globe ikonu + metin:
+
+  <button onClick={toggleLanguage} className="flex items-center gap-2 ...">
+    <svg className="h-4 w-4" ...>  {/* dünya/globe ikonu */}
+      <path ... />
+    </svg>
+    {i18n.language === "tr" ? "English" : "Türkçe"}
+  </button>
+
+  → Tüm platformlarda (Windows, macOS, Linux) düzgün görünür.
+  → Daha profesyonel ve temiz görünüm.
+  → İkon kaynak: Heroicons (outline/globe-alt)
+
+========================================================
+FRONTEND — components/Toast.jsx — TOAST BİLDİRİM SİSTEMİ
+========================================================
+
+## NEDEN OLUŞTURULDU?
+Önceden doküman işlemleri başarı/hata durumlarını satır içi
+div element'leri ile gösteriyordu. Bu UI açısından sorunluydu:
+  - Hata mesajı sayfada kalıcı olarak görünürdü.
+  - Kullanıcı mesajı okumasa da form alanını kapatırdı.
+  - Birden fazla mesaj bir arada görüntülenemezdi.
+
+Toast sistemi ile:
+  → Mesajlar sağ üstte (fixed top-5 right-5) kayar şekilde çıkar.
+  → 4 saniye sonra otomatik kapanır.
+  → Kullanıcı isterse X ile manuel kapatır.
+  → Birden fazla mesaj üst üste yığılır.
+
+## DIŞ AKTARIMLAR (export)
+
+  Toast       : Tekil toast bileşeni (internal kullanım)
+  ToastContainer : Tüm toast'ları render eden wrapper
+  useToast    : State yönetimi hook'u
+
+## useToast() HOOK'U
+
+  const { toasts, addToast, removeToast } = useToast();
+
+  addToast(message, type)
+    → type: "success" | "error" | "info"
+    → Her çağrıda benzersiz ID üretir (Date.now())
+    → 4 saniye sonra setTimeout ile otomatik removeToast çağırır
+
+  removeToast(id)
+    → Belirtilen toast'ı listeden çıkarır
+
+## KULLANIM
+
+  import { ToastContainer, useToast } from "../components/Toast";
+
+  function MyPage() {
+    const { toasts, addToast, removeToast } = useToast();
+
+    return (
+      <>
+        <ToastContainer toasts={toasts} onClose={removeToast} />
+        <button onClick={() => addToast("Başarılı!", "success")}>
+          Tıkla
+        </button>
+      </>
+    );
+  }
+
+## GÖRSEL TASARIM
+
+  Konumu  : fixed right-5 top-5 z-50
+  Boyutu  : w-80 (320px sabit genişlik)
+  Animasyon: slide-in-from-right (Tailwind animate)
+  Renkler :
+    success → yeşil (bg-green-50 border-green-500 text-green-800)
+    error   → kırmızı (bg-red-50 border-red-500 text-red-800)
+    info    → mavi (bg-blue-50 border-blue-500 text-blue-800)
+
+========================================================
+FRONTEND — components/ConfirmModal.jsx — SİLME ONAYI
+========================================================
+
+## NEDEN OLUŞTURULDU?
+window.confirm() tarayıcının native dialog'unu açar.
+Bu dialog:
+  → Tailwind ile stil uygulanamaz.
+  → Türkçe/İngilizce metin kontrolü yoktur.
+  → Modern UI beklentisini karşılamaz.
+  → Bazı tarayıcılarda devre dışı bırakılabilir.
+
+ConfirmModal ile:
+  → Tam ekran blur backdrop (bg-black/50)
+  → Kırmızı uyarı ikonu (Heroicons ExclamationTriangle)
+  → i18n ile çevrilebilir başlık ve mesaj
+  → ESC tuşu + backdrop tıklaması ile iptal
+
+## PROPS
+
+  title     : string  → Modal başlığı (örn: "Belgeyi Sil")
+  message   : string  → Açıklama (örn: "Bu işlem geri alınamaz.")
+  onConfirm : () => void → Onayla butonuna basılınca çalışır
+  onCancel  : () => void → İptal butonuna veya ESC/backdrop'a basılınca
+
+## KLAVYE DESTEĞI
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  → ESC tuşu ile modal kapatılır.
+  → Cleanup: bileşen unmount olunca event listener kaldırılır.
+    Bellek sızıntısı olmaz.
+
+## KULLANIM — DocumentsPage.jsx
+
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  {confirmDeleteId && (
+    <ConfirmModal
+      title={t("documents.deleteConfirmTitle")}
+      message={t("documents.deleteConfirm")}
+      onConfirm={handleConfirmDelete}
+      onCancel={() => setConfirmDeleteId(null)}
+    />
+  )}
+
+  → confirmDeleteId null ise modal render edilmez.
+  → handleDelete(id) çağrılınca confirmDeleteId set edilir → modal açılır.
+  → handleConfirmDelete() gerçek silme işlemini yapar.
+
+========================================================
+FRONTEND — pages/DocumentsPage.jsx — BÜYÜK GÜNCELLEME
+========================================================
+
+## YAPILAN DEĞİŞİKLİKLER
+
+### 1. setError BUG DÜZELTME (KRİTİK)
+
+  Önceden: setError("") çağrısı üç farklı fonksiyonda vardı.
+  Sorun   : "error" state hiç tanımlanmamıştı (useState ile).
+  Sonuç   : "setError is not defined" runtime hatası → sayfa
+            çalışmıyordu, doküman listesi yüklenmiyordu,
+            yükleme yapılamıyordu.
+  Çözüm   : Tüm setError("") çağrıları kaldırıldı.
+            Hata gösterimi artık tamamen toast sisteminde.
+
+  Etkilenen fonksiyonlar:
+    → fetchDocuments()          → setError("") kaldırıldı
+    → handleUpload()            → setError("") kaldırıldı
+    → handleViewChunks()        → setError("") kaldırıldı
+
+### 2. TOAST BİLDİRİMLERİ
+
+  Tüm başarı ve hata mesajları artık toast ile gösteriliyor:
+    addToast(t("documents.errors.fetchDocuments"), "error")
+    addToast(t("documents.uploadSuccess"), "success")
+    addToast(t("documents.deleteSuccess"), "success")
+    addToast(t("documents.retrySuccess"), "success")
+    addToast(t("documents.errors.uploadFailed"), "error")
+    vs.
+
+  Avantajı: Mesajlar 4 sn sonra kaybolur, sayfa temiz kalır.
+
+### 3. CONFIRM MODAL İLE SİLME
+
+  Önceden: window.confirm() → tarayıcı native dialog'u
+  Şimdi  : ConfirmModal bileşeni → özel tasarımlı onay ekranı
+
+  Durum yönetimi:
+    const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  handleDelete(id)     → confirmDeleteId set eder → modal açılır
+  handleConfirmDelete()→ asıl silme API çağrısını yapar
+
+### 4. DURUM ÇEVİRİLERİ
+
+  document.status değeri doğrudan gösterilmek yerine:
+    t(`documents.statuses.${document.status}`) || document.status
+
+  Türkçe'de → "Yüklendi", "İşleniyor", "Tamamlandı", "Başarısız"
+  İngilizce'de → "Uploaded", "Processing", "Completed", "Failed"
+
+### 5. KÜÇÜK DÜĞME BOYUTLARI
+
+  Tablo satırlarında üç düğme yan yana sığması için:
+    className="rounded px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap"
+  
+  Hücreler arası boşluk azaltıldı: gap-0.5, td px-2
+
+### 6. "DURUM" BUTONU KALDIRILDI
+
+  Her satırda ayrı "Durum" (status refresh) butonu vardı.
+  Gereksiz karmaşıklık yaratıyordu. Kaldırıldı.
+  Durum yenileme için üst sağdaki "Yenile" butonu yeterli.
+
+### 7. ID LABEL — DİLe GÖRE
+
+  Türkçe → "No: 42"    (t("documents.listCard.idLabel") = "No")
+  İngilizce → "ID: 42" (t("documents.listCard.idLabel") = "ID")
+
+========================================================
+FRONTEND — layouts/DashboardLayout.jsx — GÜNCELLEME
+========================================================
+
+## YAPILAN DEĞİŞİKLİKLER
+
+### Dil Değiştirme Butonu Eklendi (Sol Alt Köşe)
+
+  <button onClick={toggleLanguage} className="flex w-full items-center
+    justify-center gap-2 rounded-lg border border-slate-600 px-4 py-2
+    text-sm font-medium text-slate-300 hover:bg-slate-800">
+    <svg ...>  {/* globe ikonu */}  </svg>
+    {i18n.language === "tr" ? "English" : "Türkçe"}
+  </button>
+
+  → Çıkış Yap butonunun üstünde konumlandırıldı.
+  → Globe SVG ikonu: bayrak emoji Windows'ta çalışmıyor.
+  → Tam genişlik (w-full) → sidebar genişliğiyle uyumlu.
+
+## I18N GEÇİŞLERİ
+
+  Tüm sabit metinler t() ile:
+    "Enterprise RAG"         → t("nav.appName")
+    "Kontrol Paneli"         → t("nav.dashboard")
+    "Dokümanlar"             → t("nav.documents")
+    "Sohbet"                 → t("nav.chat")
+    "Çıkış Yap"              → t("nav.logout")
+
+========================================================
+FRONTEND — pages/LoginPage.jsx — GÜNCELLEME
+========================================================
+
+## YAPILAN DEĞİŞİKLİKLER
+
+### Dil Değiştirme Butonu Eklendi (Form Altında)
+
+  <button onClick={toggleLanguage} className="flex items-center gap-2
+    rounded-lg border border-slate-300 px-4 py-1.5 text-xs font-medium
+    text-slate-600 hover:bg-slate-50">
+    <svg className="h-3.5 w-3.5" ...>  {/* küçük globe ikonu */}  </svg>
+    {i18n.language === "tr" ? "English" : "Türkçe"}
+  </button>
+
+### I18N GEÇİŞLERİ
+
+  Tüm sabit metinler t() ile:
+    "Giriş Yap"    → t("login.title")
+    "Email"        → t("login.emailLabel")
+    "Şifre"        → t("login.passwordLabel")
+    "Giriş Yap"    → t("login.submitButton")
+    vs.
+
+  Test kullanıcısı varsayılanları güncellendi:
+    email    : "test@test.com"
+    password : "123456"
+
+========================================================
+FRONTEND — main.jsx — GÜNCELLEME
+========================================================
+
+  import "./i18n/i18n.js";
+
+  → App render edilmeden ÖNCE i18next başlatılır.
+  → Bu sayede ilk render'da bile doğru dil metinleri görünür.
+  → Asenkron değil: JSON dosyaları derleme zamanında import edildiği
+    için yükleme gecikmesi (loading flicker) olmaz.
+
+========================================================
+SON COMMIT (Bu Oturum)
+========================================================
+
+Commit Mesajı : "Add i18n support, toast notifications, confirm modal, fix setError bug"
+Tarih         : 19 Mayıs 2026
+
+Değişen / eklenen dosyalar:
+  YENİ → src/i18n/i18n.js
+  YENİ → src/i18n/locales/tr.json
+  YENİ → src/i18n/locales/en.json
+  YENİ → src/components/Toast.jsx
+  YENİ → src/components/ConfirmModal.jsx
+  DEĞİŞTİ → src/main.jsx              (i18n import eklendi)
+  DEĞİŞTİ → src/layouts/DashboardLayout.jsx (i18n + dil butonu + globe SVG)
+  DEĞİŞTİ → src/pages/LoginPage.jsx   (i18n + dil butonu + globe SVG)
+  DEĞİŞTİ → src/pages/DashboardPage.jsx (i18n)
+  DEĞİŞTİ → src/pages/DocumentsPage.jsx (i18n + toast + confirm modal + setError fix)
+  DEĞİŞTİ → src/pages/ChatPage.jsx    (i18n)
+
+Temel değişiklikler:
+  ✓ Türkçe/İngilizce tam çeviri desteği (react-i18next)
+  ✓ Dil tercihi localStorage'da kalıcı
+  ✓ Her sayfada dil değiştirme butonu (globe SVG ile)
+  ✓ Doküman durumları Türkçe/İngilizce gösterimi
+  ✓ Toast bildirim sistemi (window.alert yerine)
+  ✓ ConfirmModal (window.confirm yerine)
+  ✓ setError undefined referansı bug'ı giderildi
+  ✓ Tablo butonları küçültüldü (px-1.5 py-0.5 text-[10px])
+  ✓ "Durum" per-satır butonu kaldırıldı
   → Sayfa reload olmaz, SPA geçişi yapılır.
 
   catch → setError("Email veya şifre hatalı.")

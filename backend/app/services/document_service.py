@@ -130,3 +130,13 @@ def get_document_by_id_and_organization(
         )
         .first()
     )
+
+def delete_document(
+    db: Session,
+    document: Document,
+) -> None:
+    if document.file_path and os.path.exists(document.file_path):
+        os.remove(document.file_path)
+
+    db.delete(document)
+    db.commit()

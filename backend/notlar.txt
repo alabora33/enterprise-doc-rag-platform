@@ -3933,6 +3933,63 @@ GENEL MİMARİ BAKIŞ — KULLANIM TAKİP SİSTEMİ
             ↓
   db.commit() → Hem asıl işlem hem log aynı anda DB'ye yazılır
             ↓
+
+========================================================
+SON COMMIT (Bu Oturum) — DOKÜMAN SİLME KISITLAMASI KALDIRILDI
+========================================================
+
+Commit Mesajı : "Allow delete for documents in any status including processing"
+Tarih         : 19 Mayıs 2026
+
+Değişen dosya:
+  DEĞİŞTİ → backend/app/api/v1/documents.py
+
+## YAPILAN DEĞİŞİKLİK
+
+DELETE /api/v1/documents/{document_id} endpoint'inde
+önceden şu kısıtlama vardı:
+
+  Eski kod:
+    if document.status == "processing":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete a document that is currently being processed."
+        )
+
+  Yeni kod:
+    → Bu blok tamamen kaldırıldı.
+    → DELETE artık tüm durumlarda çalışıyor:
+      "uploaded", "processing", "completed", "failed"
+
+## NEDEN KALDIRILDI?
+
+  Kullanıcı perspektifinden:
+    → "İşleniyor" durumundaki bir dosya silinmek istenebilir.
+      Örneğin yanlış dosya yüklendi, işlem bitsin diye beklemeye
+      gerek olmamalı.
+    → Kullanıcı "Sil" düğmesine tıkladığında 400 hata
+      alması kötü UX'tir.
+
+  Teknik perspektiften:
+    → Celery worker dokümanı işlerken silme yapılırsa
+      worker kısa süre sonra "processing" adımını tamamlamaya
+      çalışır. Doküman DB'de yoktur → IntegrityError veya
+      basit "not found" hatası oluşur.
+    → Worker bu hatayı yakalayıp görevi başarısız işaretler —
+      zaten silinmiş bir kayıt için bu kabul edilebilir davranış.
+    → Celery görevinin yarım kalması sistem bütünlüğüne
+      ciddi zarar vermez: chunk'lar temizlenir, embedding
+      yarım kalırsa da silinmiş doküman DB'de yoktur.
+
+  Tasarım kararı:
+    → Kullanıcı deneyimi önceliklendirildi.
+    → Celery işleminin yarıda kesilmesi edge case olarak kabul edildi.
+    → İleride Celery görevi revoke edilmek istenirse:
+        celery_app.control.revoke(task_id, terminate=True)
+      şeklinde task_id saklanarak iptal yapılabilir.
+      Şu an bu karmaşıklık gerekmediğinden eklenmedi.
+
+========================================================
   usage_logs tablosuna yeni satır eklenir
 
   Celery worker'da doküman işlenince:

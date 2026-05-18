@@ -1,0 +1,103 @@
+{
+  "common": {
+    "cancel": "Cancel",
+    "delete": "Delete"
+  },
+  "login": {
+    "title": "Enterprise Document RAG",
+    "subtitle": "Sign in to the corporate document intelligence platform",
+    "emailLabel": "Email",
+    "passwordLabel": "Password",
+    "loginButton": "Login",
+    "loggingIn": "Logging in...",
+    "invalidCredentials": "Invalid email or password."
+  },
+  "nav": {
+    "dashboard": "Dashboard",
+    "documents": "Documents",
+    "chat": "Chat",
+    "logout": "Logout",
+    "appSubtitle": "Document Intelligence"
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "subtitle": "Corporate document intelligence platform management panel.",
+    "userCard": {
+      "title": "User",
+      "email": "Email",
+      "name": "Name",
+      "superuser": "Superuser",
+      "yes": "Yes",
+      "no": "No",
+      "loading": "Loading..."
+    },
+    "orgCard": {
+      "title": "Organizations",
+      "role": "Role"
+    }
+  },
+  "documents": {
+    "title": "Documents",
+    "subtitle": "Upload corporate documents, track processing status and view generated chunks.",
+    "refreshButton": "Refresh",
+    "uploadCard": {
+      "title": "Upload Document",
+      "description": "You can upload PDF, DOCX, XLSX or TXT files.",
+      "fileLabel": "File",
+      "selectedFile": "Selected",
+      "uploadButton": "Upload",
+      "uploading": "Uploading..."
+    },
+    "listCard": {
+      "title": "Document List",
+      "loading": "Loading...",
+      "colFile": "File",
+      "colStatus": "Status",
+      "colSize": "Size",
+      "colActions": "Actions",
+      "empty": "No documents uploaded yet.",
+      "idLabel": "ID",
+      "statusBtn": "Status",
+      "chunksBtn": "Chunks",
+      "retryBtn": "Retry",
+      "deleteBtn": "Delete",
+      "note": "Note: After upload, the document may first appear as <b>uploaded</b>. It becomes <b>completed</b> once the Celery worker has processed it."
+    },
+    "statuses": {
+      "uploaded": "Uploaded",
+      "processing": "Processing",
+      "completed": "Completed",
+      "failed": "Failed"
+    },
+    "chunksPanel": {
+      "title": "Chunks",
+      "description": "Text segments extracted from the document.",
+      "loading": "Loading chunks...",
+      "empty": "No chunks found. The document may still be processing or no text could be extracted.",
+      "closeButton": "Close",
+      "chunkLabel": "Chunk #",
+      "typeLabel": "Type",
+      "pageLabel": "Page",
+      "sheetLabel": "Sheet"
+    },
+    "errors": {
+      "fetchDocuments": "An error occurred while fetching documents.",
+      "noFileSelected": "Please select a file.",
+      "uploadFailed": "An error occurred while uploading the file.",
+      "retryFailed": "An error occurred while reprocessing the document.",
+      "refreshStatusFailed": "An error occurred while updating the document status.",
+      "fetchChunksFailed": "An error occurred while fetching chunk information.",
+      "deleteFailed": "An error occurred while deleting the document.",
+      "deleteProcessing": "Cannot delete a document that is being processed."
+    },
+    "deleteConfirm": "Are you sure you want to delete this document?",
+    "deleteConfirmTitle": "Delete Document",
+    "deleteSuccess": "Document deleted successfully.",
+    "uploadSuccess": "Document uploaded successfully.",
+    "retrySuccess": "Document queued for reprocessing."
+  },
+  "chat": {
+    "title": "Chat",
+    "subtitle": "The RAG-based document chat screen will be here."
+  }
+}
