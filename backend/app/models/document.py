@@ -87,3 +87,10 @@ class Document(Base):
     uploaded_by = relationship(
         "User",
     )
+
+    chunks = relationship(
+        "DocumentChunk",
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
+    

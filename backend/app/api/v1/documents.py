@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
-
+from app.schemas.document_chunk import DocumentChunkRead
+from app.models.document_chunk import DocumentChunk
+from app.services.document_processing_service import process_document
 from app.api.v1.users import get_current_user
 from app.db.session import get_db
 from app.schemas.document import DocumentRead
@@ -59,14 +61,18 @@ def upload_document(
             upload_file=file,
         )
 
-        return document
+        processed_document = process_document(
+            db=db,
+            document_id=document.id,
+        )
+
+        return processed_document
 
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-
 
 @router.get(
     "",
@@ -114,3 +120,36 @@ def get_document(
         )
 
     return document
+
+@router.get(
+    "/{document_id}/chunks",
+    response_model=list[DocumentChunkRead],
+)
+def get_document_chunks(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    organization_id = get_current_user_primary_organization_id(
+        db,
+        user_id=current_user.id,
+    )
+
+    document = get_document_by_id_and_organization(
+        db,
+        document_id=document_id,
+        organization_id=organization_id,
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    return (
+        db.query(DocumentChunk)
+        .filter(DocumentChunk.document_id == document.id)
+        .order_by(DocumentChunk.chunk_index.asc())
+        .all()
+    )

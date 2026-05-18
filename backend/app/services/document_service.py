@@ -13,7 +13,6 @@ ALLOWED_EXTENSIONS = {
     ".pdf",
     ".docx",
     ".xlsx",
-    ".xls",
     ".txt",
 }
 

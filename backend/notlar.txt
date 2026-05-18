@@ -1930,3 +1930,431 @@ GÜVENLİK ÖZETİ:
   - Dosya boyutu: gerçek byte sayımı (header'a güvenilmez)
 
 ========================================================
+
+========================================================
+COMMIT: "Add document parsing, chunking and processing pipeline"
+— DOKÜMAN İŞLEME PIPELINE'ININ EKLENMESİ
+========================================================
+
+Bu commit ile yüklenen dosyalar artık otomatik olarak parse edilir,
+metin parçalara (chunk) bölünür ve her chunk veritabanına kaydedilir.
+RAG pipeline'ının ilk kritik aşaması tamamlandı.
+
+Etkilenen dosyalar (migration hariç):
+  GÜNCELLEME : models/__init__.py
+  GÜNCELLEME : models/document.py  (chunks relationship eklendi)
+  GÜNCELLEME : api/v1/documents.py (işleme + chunks endpoint eklendi)
+  YENİ       : models/document_chunk.py
+  YENİ       : schemas/document_chunk.py
+  YENİ       : services/parser_service.py
+  YENİ       : services/chunking_service.py
+  YENİ       : services/document_processing_service.py
+
+========================================================
+MODELS/DOCUMENT_CHUNK.PY — YENİ: CHUNK MODELİ
+========================================================
+
+DocumentChunk(Base) — "document_chunks" tablosunu tanımlar.
+Her satır bir dokümanın metin parçasını temsil eder.
+
+  id: Integer — primary_key=True, index=True
+    → Her chunk'ın benzersiz ID'si.
+
+  document_id: ForeignKey("documents.id", ondelete="CASCADE")
+    → Hangi dokümana ait olduğu.
+    → ondelete="CASCADE": Doküman silinince o dokümana ait tüm
+      chunk'lar otomatik silinir.
+    → index=True: "Bu dokümanın chunk'larını getir" sorgusu kritik,
+      index olmadan N chunk için full table scan olur.
+
+  organization_id: ForeignKey("organizations.id", ondelete="CASCADE")
+    → Organizasyon bazlı erişim kontrolü için doğrudan tutulur.
+    → Neden document üzerinden değil doğrudan burada?
+      JOIN yazmadan "bu organizasyonun chunk'ları" filtrelenebilsin.
+      İleride vector search sorguları bu alana göre filtre uygular.
+    → ondelete="CASCADE": Organizasyon silinince chunk'lar da silinir.
+
+  chunk_index: Integer, nullable=False, index=True
+    → Chunk'ın belgedeki sırası (0, 1, 2...).
+    → Sıralı listeleme ve context window oluşturma için gerekli.
+    → index=True: ORDER BY chunk_index sorgularına hız sağlar.
+
+  content: Text, nullable=False
+    → Chunk'ın gerçek metin içeriği.
+    → Text tipi seçildi çünkü String(N) için N belirsiz.
+      Chunk boyutu 1200 karakter ama UTF-8 multibyte karakter
+      ve overlap varken safe olmak için Text kullanıldı.
+
+  page_number: Integer, nullable=True
+    → PDF için sayfa numarası. PDF dışı dosyalarda NULL.
+    → Kaynak gösterme (citation): "Bu bilgi sayfa 12'de."
+
+  sheet_name: String(255), nullable=True
+    → Excel için sayfa adı. Excel dışı dosyalarda NULL.
+    → Kaynak gösterme: "Bu bilgi 'Bütçe 2024' sayfasında."
+
+  source_type: String(50), nullable=True
+    → Dosya türü: "pdf", "docx", "xlsx", "txt".
+    → Farklı kaynak türlerini UI'da ayırt etmek için.
+    → Neden nullable? Gelecekte başka kaynaklardan (URL, API)
+      gelen chunk'lar için NULL bırakma esnekliği.
+
+  created_at: DateTime, default=datetime.utcnow
+    → Chunk ne zaman oluşturuldu.
+
+  document = relationship("Document", back_populates="chunks")
+    → chunk.document ile Document nesnesine ulaşılır.
+    → back_populates="chunks": iki yönlü ilişki (document.chunks
+      ve chunk.document birbirini bilir).
+
+========================================================
+MODELS/DOCUMENT.PY — GÜNCELLEME: chunks RELATIONSHIP EKLENDİ
+========================================================
+
+Document modeline tek yeni satır:
+
+  chunks = relationship(
+      "DocumentChunk",
+      back_populates="document",
+      cascade="all, delete-orphan",
+  )
+
+  Ne sağlar?
+    → document.chunks yazarak o dokümana ait tüm chunk'lara
+      ORM üzerinden erişilir. JOIN yazmak gerekmez.
+
+  cascade="all, delete-orphan" neden?
+    → Doküman silinince SQLAlchemy session seviyesinde de
+      chunk'ları temizler. DB'deki ondelete="CASCADE" ile
+      çift güvence sağlanır: DB ve ORM her ikisi de temizler.
+    → delete-orphan: document.chunks listesinden bir chunk
+      çıkarılırsa (pop/remove) ORM onu otomatik siler.
+
+========================================================
+MODELS/__INIT__.PY — GÜNCELLEME
+========================================================
+
+Önceki __all__:
+  ["User", "Organization", "UserOrganizationRole", "Document"]
+
+Yeni __all__:
+  ["User", "Organization", "UserOrganizationRole",
+   "Document", "DocumentChunk"]
+
+SORUN: DocumentChunk __all__'a eklendi ama import satırı
+       eksik kaldı (from app.models.document_chunk import DocumentChunk).
+       Bu durum "from app.models import DocumentChunk" çalışmaz.
+       Alembic autogenerate çalışıyorsa document_chunk.py zaten
+       document_processing_service.py üzerinden import edildiği için
+       şimdilik sorun çıkmayabilir, ama __init__.py'a import eklenmeli.
+
+========================================================
+SCHEMAS/DOCUMENT_CHUNK.PY — YENİ: CHUNK READ ŞEMASI
+========================================================
+
+class DocumentChunkRead(BaseModel):
+    id, document_id, organization_id
+    chunk_index, content
+    page_number, sheet_name, source_type
+    created_at
+
+  model_config = {"from_attributes": True}
+    → ORM nesnesinden doğrudan serialize edilir.
+    → GET /{document_id}/chunks endpoint'inin response şeması.
+
+  Neden Create şeması yok?
+    → Chunk'lar hiçbir zaman API üzerinden doğrudan oluşturulmaz.
+      Sadece document_processing_service.py içeride yazar.
+      Dışarıdan chunk yazmak güvenlik açığı olurdu.
+
+========================================================
+SERVICES/PARSER_SERVICE.PY — YENİ: DOSYA AYRIŞTIRICISI
+========================================================
+
+ParsedSection = dict[str, Any]
+  → Her ayrıştırma sonucu: {"text": ..., "page_number": ...,
+                             "sheet_name": ..., "source_type": ...}
+
+## parse_txt(file_path) → list[ParsedSection]
+  Tüm dosya tek bir section olarak döner.
+  encoding="utf-8", errors="ignore": Bozuk karakterler atlanır,
+  dosya yükleme başarısız olmaz.
+
+## parse_pdf(file_path) → list[ParsedSection]
+  PdfReader ile her sayfa ayrı section olur.
+  page_number = sayfa numarası (1'den başlar).
+  Boş sayfalar (text.strip() == "") atlanır.
+  Neden sayfa bazlı?
+    → PDF'in hangi sayfasından geldiği chunk'ta kaydedilir.
+    → RAG sonuçlarında kaynak: "sayfa 5'te bu konudan bahsedilmekte."
+
+## parse_docx(file_path) → list[ParsedSection]
+  python-docx ile tüm paragraflar okunur, boşlar atlanır.
+  Tek bir text string'e birleştirilir (join).
+  Tüm dosya tek section → pdf gibi bölünmez çünkü docx'ta
+  sayfa numarası güvenilir şekilde çıkarılamaz.
+  page_number=None, sheet_name=None, source_type="docx"
+
+## parse_xlsx(file_path) → list[ParsedSection]
+  openpyxl ile her worksheet ayrı section olur.
+  sheet.title → sheet_name alanına yazılır.
+  Her satırın hücreleri " | " ile birleştirilir:
+    ["Ahmet", "Satış", "150000"] → "Ahmet | Satış | 150000"
+  Boş hücreler atlanır. Boş satırlar atlanır. Boş sheet atlanır.
+  read_only=True: büyük Excel dosyalarında bellek tasarrufu.
+  data_only=True: formül yerine hesaplanmış değer okunur.
+
+## parse_document(file_path) → list[ParsedSection]
+  Dispatch fonksiyonu. Extension'a göre doğru parser'ı çağırır.
+  Bilinmeyen extension → ValueError fırlatır.
+  Güvenlik: whitelist mantığı — sadece bilinen tipler işlenir.
+  Yeni format eklemek: sadece buraya elif eklenir, başka kod değişmez.
+
+========================================================
+SERVICES/CHUNKING_SERVICE.PY — YENİ: METİN BÖLÜCÜ
+========================================================
+
+## split_text_into_chunks(text, chunk_size=1200, chunk_overlap=200)
+   → list[str]
+
+  cleaned_text = " ".join(text.split())
+    → Çoklu boşluklar, tab, newline tek boşluğa indirilir.
+    → Tutarsız whitespace chunk sınırlarında tahmin edilemez
+      davranışa yol açar. Normalize edilince chunk boyutları
+      daha tutarlı olur.
+
+  Sliding window algoritması:
+    start = 0
+    while start < text_length:
+        end   = start + chunk_size       → chunk sonu
+        chunk = cleaned_text[start:end]  → alınan parça
+        start = end - chunk_overlap      → sonraki başlangıç
+
+  chunk_overlap=200 neden?
+    → Bir bilgi iki chunk arasına denk gelirse hiçbirinde
+      tam olarak geçmez → LLM context'i anlayamaz.
+    → 200 karakter overlap: her chunk'ın başı bir öncekinin
+      sonuyla örtüşür. Bağlam kaybolmaz.
+    → RAG kalitesi için kritik tasarım kararı.
+
+## create_chunks_from_sections(sections, chunk_size=1200,
+                                chunk_overlap=200)
+   → list[dict[str, Any]]
+
+  Her section için split_text_into_chunks çalışır.
+  Global chunk_index korunur (section başında sıfırlanmaz).
+  Her chunk dict'i:
+    {"chunk_index": N, "content": "...",
+     "page_number": ..., "sheet_name": ..., "source_type": ...}
+
+  page_number ve sheet_name section'dan kopyalanır.
+    → PDF'in 3. sayfasından gelen tüm chunk'lar page_number=3 taşır.
+    → Excel'in "Bütçe" sheet'inden gelen chunk'lar sheet_name="Bütçe".
+
+========================================================
+SERVICES/DOCUMENT_PROCESSING_SERVICE.PY — YENİ: İŞLEM ORKESTRATÖRü
+========================================================
+
+process_document(db, document_id) → Document
+
+Bu fonksiyon tüm pipeline'ı yönetir:
+parse → chunk → DB'ye yaz → status güncelle
+
+## Akış Detayı:
+
+1. document = db.query(Document).filter(id == document_id).first()
+   → Doküman yoksa ValueError fırlatılır (API 400'e çevirir).
+
+2. document.status = PROCESSING → db.commit()
+   → İşlem başladı sinyali. Uzun süren dosyalarda UI bu durumu gösterir.
+   → Neden hemen commit? İşlem çökse bile PROCESSING durumu kalır,
+     monitör/admin "takılı kalan" işlemleri görebilir.
+
+3. sections = parse_document(file_path)
+   → Parser service dosyayı okur, section listesi döner.
+
+4. chunks = create_chunks_from_sections(sections)
+   → Chunking service section'ları chunk'lara böler.
+
+5. Mevcut chunk'ları sil:
+   existing_chunks = db.query(DocumentChunk).filter(document_id).all()
+   for chunk in existing_chunks: db.delete(chunk)
+   db.flush()
+   → Neden? Doküman yeniden işlenirse (reprocess) eski chunk'lar
+     temizlenir, çift kayıt oluşmaz.
+   → db.flush(): silmeler SQL'e çevrilir ama commit edilmez.
+     Yeni chunk'lar eklenmeden önce çakışma riski ortadan kalkar.
+
+6. Yeni chunk'ları ekle:
+   for chunk in chunks:
+       document_chunk = DocumentChunk(document_id, organization_id,
+                                       chunk_index, content, ...)
+       db.add(document_chunk)
+
+7. document.status = COMPLETED → db.commit() → db.refresh()
+   → Tüm chunk'lar ve durum tek commit ile yazılır (atomik).
+
+## Hata Yönetimi (except Exception):
+
+   db.rollback()
+   → Yarım yazılan chunk'lar geri alınır.
+
+   document yeniden sorgulanır:
+   → Rollback sonrası eski nesne geçersiz (detached state).
+     Yeni sorgu ile taze nesne alınır.
+
+   document.status = FAILED → db.commit()
+   → Hata durumu DB'ye yazılır.
+
+   raise
+   → Hata üst katmana iletilir, API 500 veya 400 döner.
+
+  Neden rollback sonrası yeni sorgu?
+    → db.rollback() sonrası session'daki ORM nesneleri
+      "detached" olur. Onlar üzerinden işlem yapılmaya
+      çalışılırsa "Instance is not bound to a Session" hatası alınır.
+      Yeni db.query() ile taze nesne almak zorunlu.
+
+========================================================
+API/V1/DOCUMENTS.PY — GÜNCELLEME: İŞLEME VE CHUNK LİSTELEME
+========================================================
+
+## POST /documents/upload — DEĞİŞİKLİK
+
+Önceki hal:
+  document = create_document_record(...)
+  return document   ← sadece DB kaydı döndürülüyordu
+
+Yeni hal:
+  document = create_document_record(...)
+  processed_document = process_document(db=db, document_id=document.id)
+  return processed_document
+
+  Ne değişti?
+    → Dosya yüklenir yüklenmez parse + chunk pipeline'ı
+      senkron olarak çalışır.
+    → Sonuç: status=COMPLETED olan (veya FAILED olan) doküman döner.
+    → Neden senkron? Şu an Celery kuyruk sistemi henüz entegre
+      değil. İleride process_document Celery task'ına taşınacak.
+      O aşamada upload endpoint sadece UPLOADED döner, Celery
+      arka planda PROCESSING → COMPLETED/FAILED yapar.
+
+  ValueError yakalanma kapsamı genişledi:
+    → create_document_record'dan gelen ValueError (geçersiz uzantı)
+    → process_document'ten gelen ValueError (doküman bulunamadı)
+    → İkisi de HTTPException 400'e çevrilir.
+
+## GET /documents/{document_id}/chunks — YENİ ENDPOINT
+
+  @router.get("/{document_id}/chunks",
+              response_model=list[DocumentChunkRead])
+
+  Akış:
+  1. get_current_user_primary_organization_id() → org_id
+  2. get_document_by_id_and_organization() → doküman var mı + tenant check
+     → 404 döner doküman yoksa
+  3. db.query(DocumentChunk)
+       .filter(document_id == document.id)
+       .order_by(chunk_index.asc())
+       .all()
+
+  Neden önce document sorgulanır, doğrudan chunk'a gidilmez?
+    → Tenant isolation: başka organizasyonun dokümanına ait
+      chunk_id'leri bilerek /chunks endpoint'i çağırılamaz.
+      Document sorgusu organization_id ile filtreler.
+    → Doküman yoksa 404, varsa chunk'lar döner.
+
+  order_by(chunk_index.asc())
+    → Chunk'lar belgedeki sıraya göre gelir.
+    → LLM'e context verilirken doğal okuma sırası korunur.
+
+  Oluşan URL: GET /api/v1/documents/{document_id}/chunks
+
+========================================================
+MİGRASYONLAR — DOCUMENT_CHUNKS TABLOSU
+========================================================
+
+Bu süreçte birden fazla migration denemesi yapıldı:
+
+  47eb180bb248_add_document_chunks_table.py  → ilk deneme
+  bbf5718ec7bd_add_document_chunks_table.py  → ikinci deneme
+  af7df02fecaa_fix_missing_document_chunks_table.py → düzeltme
+
+  Nedenler:
+    → Alembic revizyon zinciri karıştı (multiple heads sorunu).
+    → Bazı denemeler merge branch gerektirdi.
+    → Sonunda document_chunks tablosu başarıyla oluşturuldu.
+
+  Son migration'da oluşturulan yapı:
+    - document_chunks tablosu
+    - Kolonlar: id, document_id, organization_id, chunk_index,
+                content, page_number, sheet_name, source_type,
+                created_at
+    - FK: document_id → documents.id (ondelete=CASCADE)
+    - FK: organization_id → organizations.id (ondelete=CASCADE)
+    - Index'ler:
+        ix_document_chunks_id
+        ix_document_chunks_document_id     → chunk listeleme
+        ix_document_chunks_organization_id → org bazlı filtre
+        ix_document_chunks_chunk_index     → sıralama
+
+========================================================
+TÜM PIPELINE AKIŞI — BÜYÜK RESİM (GÜNCEL)
+========================================================
+
+POST /api/v1/documents/upload + Bearer <token>
+        ↓
+get_current_user() → kullanıcı doğrulandı
+        ↓
+get_current_user_primary_organization_id() → org_id
+        ↓
+validate_file_extension() → whitelist kontrolü
+        ↓
+save_upload_file() → 1 MB chunk'larla diske yazıldı
+        ↓
+Document kaydı DB'ye eklendi (status=UPLOADED)
+        ↓
+process_document() çağrıldı:
+  ├── status = PROCESSING → commit
+  ├── parse_document() → sections (PDF: sayfa başına, Excel: sheet başına)
+  ├── create_chunks_from_sections() → chunk dict listesi
+  ├── Eski chunk'lar silindi (flush)
+  ├── Yeni DocumentChunk nesneleri eklendi
+  └── status = COMPLETED → commit
+        ↓
+DocumentRead şeması → 201 response (status=COMPLETED)
+
+HATA DURUMU:
+  process_document() hata fırlatırsa:
+  → db.rollback() (chunk'lar geri alındı)
+  → status = FAILED → commit
+  → ValueError → API 400
+
+GET /api/v1/documents/{id}/chunks + Bearer <token>
+        ↓
+Tenant isolation kontrolü (org_id eşleşmeli)
+        ↓
+list[DocumentChunkRead] → sıralı chunk'lar
+
+========================================================
+SONRAKİ ADIMLAR (Planlanmış)
+========================================================
+
+  1. Embedding çıkarma:
+     Her chunk.content için OpenAI/local model ile vector üret,
+     vector DB'ye (Qdrant veya pgVector) kaydet.
+
+  2. Celery entegrasyonu:
+     process_document() senkron çalışıyor.
+     Büyük PDF'ler için Celery task'ına taşınacak.
+     Upload endpoint UPLOADED dönecek, işlem arka planda.
+
+  3. RAG search endpoint:
+     Kullanıcı sorusu → embedding → benzer chunk'lar →
+     LLM'e context → kaynaklı cevap.
+
+  4. models/__init__.py düzeltmesi:
+     DocumentChunk __all__'da var ama import satırı eksik.
+     from app.models.document_chunk import DocumentChunk eklenecek.
+
+========================================================

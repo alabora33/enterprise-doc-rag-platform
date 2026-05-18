@@ -7,4 +7,5 @@ __all__ = [
     "Organization",
     "UserOrganizationRole",
     "Document",
+    "DocumentChunk",
 ]
