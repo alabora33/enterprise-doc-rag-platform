@@ -5,7 +5,13 @@ from app.api.v1.documents import get_current_user_primary_organization_id
 from app.api.v1.users import get_current_user
 from app.db.session import get_db
 from app.models.chat import ChatMessageRole
-from app.schemas.chat import ChatRequest, ChatResponse, ChatSessionDetail, ChatSessionRead
+from app.models.usage import UsageAction
+from app.schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+    ChatSessionDetail,
+    ChatSessionRead,
+)
 from app.services.chat_history_service import (
     create_chat_message,
     create_chat_session,
@@ -14,9 +20,8 @@ from app.services.chat_history_service import (
     list_chat_sessions,
 )
 from app.services.rag_service import answer_question_with_rag
-
-from app.models.usage import UsageAction
 from app.services.usage_service import create_usage_log
+
 
 router = APIRouter(
     prefix="/chat",
@@ -99,6 +104,12 @@ def chat_with_documents(
     )
 
     db.commit()
+
+    return {
+        "session_id": chat_session.id,
+        "answer": rag_result["answer"],
+        "sources": rag_result["sources"],
+    }
 
 
 @router.get(
