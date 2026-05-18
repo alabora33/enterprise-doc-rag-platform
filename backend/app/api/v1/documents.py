@@ -5,7 +5,7 @@ from app.models.document_chunk import DocumentChunk
 from app.workers.tasks import process_document_task
 from app.api.v1.users import get_current_user
 from app.db.session import get_db
-from app.schemas.document import DocumentRead
+from app.schemas.document import DocumentRead, DocumentStatusRead
 from app.services.document_service import (
     create_document_record,
     get_document_by_id_and_organization,
@@ -150,3 +150,71 @@ def get_document_chunks(
         .order_by(DocumentChunk.chunk_index.asc())
         .all()
     )
+
+@router.get(
+    "/{document_id}/status",
+    response_model=DocumentStatusRead,
+)
+def get_document_status(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    organization_id = get_current_user_primary_organization_id(
+        db,
+        user_id=current_user.id,
+    )
+
+    document = get_document_by_id_and_organization(
+        db,
+        document_id=document_id,
+        organization_id=organization_id,
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    return document
+
+@router.post(
+    "/{document_id}/retry",
+    response_model=DocumentRead,
+)
+def retry_document_processing(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    organization_id = get_current_user_primary_organization_id(
+        db,
+        user_id=current_user.id,
+    )
+
+    document = get_document_by_id_and_organization(
+        db,
+        document_id=document_id,
+        organization_id=organization_id,
+    )
+
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    if document.status == "processing":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document is already being processed.",
+        )
+
+    document.status = "uploaded"
+    db.commit()
+    db.refresh(document)
+
+    process_document_task.delay(document.id)
+
+    return document

@@ -3470,3 +3470,210 @@ TEKNİK NOTLAR
   örtüşür, LLM daha tutarlı bağlam alır.
 
 ========================================================
+
+========================================================
+DOKÜMAN DURUM TAKIBI VE YENİDEN İŞLEME ENDPOINT'LERİ
+— STATUS VE RETRY KATMANININ EKLENMESİ
+========================================================
+
+Bu eklemeyle kullanıcılar Celery arka planda çalışırken bir
+dokümanın işlem durumunu sorgulayabilir ve başarısız dokümanları
+yeniden işlemeye gönderebilir.
+
+Etkilenen dosyalar:
+  GÜNCELLEME : schemas/document.py  (DocumentStatusRead şeması eklendi)
+  GÜNCELLEME : api/v1/documents.py  (iki yeni endpoint eklendi)
+
+========================================================
+SCHEMAS/DOCUMENT.PY — GÜNCELLEME: DocumentStatusRead EKLENDİ
+========================================================
+
+class DocumentStatusRead(BaseModel):
+    id: int
+    status: str
+    original_file_name: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+Neden ayrı şema (DocumentRead yerine)?
+  → GET /documents/{id}/status endpoint'i sadece durum bilgisi döner.
+    file_path, stored_file_name, organization_id gibi teknik
+    alanların tamamı gerekmez — gereksiz veri taşınmaz.
+  → Minimal response: kullanıcının ihtiyacı "bu dosya hazır mı?"
+    sorusunun cevabıdır. id + status + dosya adı + tarih yeterli.
+  → Güvenlik: stored_file_name ve file_path disk yolunu açığa çıkarır.
+    Polling (sürekli durum sorgusu) yapan bir endpoint'te bu alanlar
+    gereksiz yere ifşa edilmemiş olur.
+
+Dahil edilen alanlar ve neden seçildikleri:
+  id              → hangi dokümanı sorguladığını client doğrulayabilir
+  status          → "uploaded", "processing", "completed", "failed"
+  original_file_name → kullanıcıya hangi dosyanın durumu gösteriliyor
+  created_at      → dosyanın ne kadar önce yüklendiği (UI için)
+
+========================================================
+API/V1/DOCUMENTS.PY — YENİ ENDPOINT 1:
+GET /documents/{document_id}/status
+========================================================
+
+@router.get(
+    "/{document_id}/status",
+    response_model=DocumentStatusRead,
+)
+def get_document_status(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+
+AMAÇ:
+  Celery ile arka planda işlenen bir dokümanın güncel durumunu
+  döndürür. Frontend bu endpoint'i polling (periyodik sorgulama)
+  ile çağırarak "Yüklendi", "İşleniyor", "Tamamlandı" gibi
+  aşamaları gösterir.
+
+AKIŞ:
+  1. get_current_user_primary_organization_id() → org_id
+  2. get_document_by_id_and_organization(document_id, org_id)
+     → Bulunamazsa 404 döner
+  3. DocumentStatusRead şeması ile filtreli yanıt döner
+
+NEDEN AYRI ENDPOINT?
+  → GET /documents/{id} de status döndürür ama DocumentRead şeması
+    ile döner (tüm alanlar). Polling senaryosunda her saniye
+    büyük bir JSON nesnesi almak yerine sadece durum bilgisi almak
+    hem daha hızlı hem daha verimli.
+  → Mobil istemci veya Frontend için lightweight endpoint.
+  → İleride WebSocket veya Server-Sent Events ile replace edilebilir,
+    ama polling için bu endpoint yeterli başlangıç noktası.
+
+TENANT ISOLATION:
+  → get_document_by_id_and_organization() iki filtre kullanır:
+    document.id ve document.organization_id.
+  → Başka organizasyonun doküman ID'si bilinse bile
+    404 döner, durum bilgisi sızdırılmaz.
+
+ÖRNEK YANIT:
+  {
+    "id": 42,
+    "status": "processing",
+    "original_file_name": "yillik_rapor.pdf",
+    "created_at": "2026-05-18T14:30:00"
+  }
+
+DURUM GEÇİŞLERİ:
+  uploaded   → Celery görevi henüz alınmadı veya kuyrukta
+  processing → Celery görevi alındı, parse/chunk/embed sürüyor
+  completed  → Tüm chunk'lar ve embedding'ler DB'ye yazıldı
+  failed     → Pipeline'da hata oluştu, retry yapılabilir
+
+========================================================
+API/V1/DOCUMENTS.PY — YENİ ENDPOINT 2:
+POST /documents/{document_id}/retry
+========================================================
+
+@router.post(
+    "/{document_id}/retry",
+    response_model=DocumentRead,
+)
+def retry_document_processing(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+
+AMAÇ:
+  status="failed" olan dokümanı yeniden işleme kuyruğuna gönderir.
+  Geçici Gemini API hatası, ağ kesintisi veya parse hatası gibi
+  durumlarda kullanıcı sistemi manuel yeniden başlatabilir.
+
+AKIŞ:
+  1. get_current_user_primary_organization_id() → org_id
+  2. get_document_by_id_and_organization(document_id, org_id)
+     → Bulunamazsa 404 döner
+  3. status == "processing" kontrolü
+     → Zaten işleniyorsa 400: "Document is already being processed."
+     → Çift işleme önlenir. Aynı doküman için iki Celery görevi
+       paralel çalışmaz, race condition engellenir.
+  4. document.status = "uploaded" → db.commit() → db.refresh()
+     → Durumu sıfırlar: Celery worker işlemi tamamlandı mı yoksa
+       yenisi mi başlatıldı bilemeyeceği için "uploaded"a döner.
+     → db.commit() burada ayrı yapılır: status güncellemesi
+       Celery görevi kuyruğa gitmeden önce DB'ye yazılmalı.
+       Worker görevi alınca "uploaded" görmeli, race condition olmasın.
+  5. process_document_task.delay(document.id) → Celery kuyruğuna
+  6. DocumentRead şeması ile güncellenen document döner
+
+NEDEN processing'i ENGELLIYORUZ?
+  → Kullanıcı "retry" endpoint'ini iki kez hızlıca tıklarsa
+    ya da arka plan görevi hâlâ çalışıyorken retry atılırsa
+    iki Celery worker aynı dokümanı eş zamanlı işler.
+  → İkisi aynı anda eski chunk'ları silmeye çalışır → DB tutarsızlığı.
+  → Bu kontrol basit ama etkili bir korumadır.
+
+NEDEN status SIFIRLANIYOR?
+  → process_document_task başladığında ilk iş status="processing"
+    yapmaktır. Eğer belge zaten "failed" durumundaysa ve retry
+    kuyruğa girdi ise status "failed" kalmaya devam eder
+    (Celery görevi almadan önce). Kullanıcı "retry yaptım ama
+    hâlâ failed yazıyor" görmesin diye status="uploaded" ile
+    sıfırlanır — Celery alınca "processing"e geçer.
+  → Kullanıcıya görsel feedback: status değişti, sistem harekete geçti.
+
+NEDEN DocumentRead DÖNÜYOR (DocumentStatusRead değil)?
+  → Retry sonrası kullanıcı tam doküman bilgisini görmek ister
+    (dosya adı, boyut, yeni durum). Zaten işlem başlatılıyor,
+    ekstra alanların maliyeti kabul edilebilir.
+  → GET /status küçük tutuldu, POST /retry daha bilgilendirici
+    yanıt veriyor. Uygun asimetri.
+
+ÖRNEK YANIT:
+  {
+    "id": 42,
+    "organization_id": 1,
+    "uploaded_by_user_id": 7,
+    "original_file_name": "yillik_rapor.pdf",
+    "stored_file_name": "a3f7b2c1-...-9d4e.pdf",
+    "file_path": "uploads/a3f7b2c1-...-9d4e.pdf",
+    "content_type": "application/pdf",
+    "file_size": 2048576,
+    "status": "uploaded",
+    "created_at": "2026-05-18T14:30:00"
+  }
+
+========================================================
+GÜNCELLENEN URL TABLOSU (DOCUMENTS ROUTER)
+========================================================
+
+  POST /api/v1/documents/upload           → dosya yükle (201)
+  GET  /api/v1/documents                  → tüm dosyaları listele
+  GET  /api/v1/documents/{id}             → tek doküman detayı
+  GET  /api/v1/documents/{id}/chunks      → chunk listesi
+  GET  /api/v1/documents/{id}/status      → sadece durum bilgisi (YENİ)
+  POST /api/v1/documents/{id}/retry       → başarısız dosyayı yeniden işle (YENİ)
+
+========================================================
+FRONTEND/CLIENT KULLANIM SENARYOSU
+========================================================
+
+NORMAL AKIŞ:
+  1. POST /documents/upload → document (status: "uploaded") döner
+  2. Her 3 saniyede GET /documents/{id}/status → polling
+  3. status "completed" olunca polling durdurulur
+  4. GET /documents/{id}/chunks ile chunk'lar gösterilir
+
+HATA AKIŞI:
+  1. Polling sırasında status "failed" görülür
+  2. Kullanıcıya "Yeniden dene" butonu gösterilir
+  3. POST /documents/{id}/retry → status "uploaded"a döner
+  4. Normal akış yeniden başlar
+
+NEDEN POLLING (WebSocket değil)?
+  → Şu an için yeterli: işlem süresi 5–30 saniye.
+  → WebSocket daha karmaşık altyapı gerektirir (connection yönetimi).
+  → İleride Server-Sent Events (SSE) veya WebSocket ile değiştirilebilir.
+  → 3 saniyelik polling: makul gecikme, sunucu üzerinde kabul
+    edilebilir yük.
+
+========================================================

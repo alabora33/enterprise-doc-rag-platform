@@ -18,3 +18,14 @@ class DocumentRead(BaseModel):
     model_config = {
         "from_attributes": True,
     }
+
+
+class DocumentStatusRead(BaseModel):
+    id: int
+    status: str
+    original_file_name: str
+    created_at: datetime
+
+    model_config = {
+        "from_attributes": True,
+    }
