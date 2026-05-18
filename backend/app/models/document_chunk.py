@@ -4,7 +4,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-
+from pgvector.sqlalchemy import Vector
 
 class DocumentChunk(Base):
     __tablename__ = "document_chunks"
@@ -36,6 +36,11 @@ class DocumentChunk(Base):
     content: Mapped[str] = mapped_column(
         Text,
         nullable=False,
+    )
+    
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(1536),
+        nullable=True,
     )
 
     page_number: Mapped[int | None] = mapped_column(

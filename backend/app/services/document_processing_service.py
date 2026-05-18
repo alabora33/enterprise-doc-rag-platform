@@ -4,7 +4,7 @@ from app.models.document import Document, DocumentStatus
 from app.models.document_chunk import DocumentChunk
 from app.services.chunking_service import create_chunks_from_sections
 from app.services.parser_service import parse_document
-
+from app.services.embedding_service import create_embeddings
 
 def process_document(
     db: Session,
@@ -32,6 +32,14 @@ def process_document(
             sections=sections,
         )
 
+        chunk_texts = [
+            chunk["content"]
+            for chunk in chunks
+        ]
+
+        embeddings = create_embeddings(
+            chunk_texts,
+        )
         existing_chunks = (
             db.query(DocumentChunk)
             .filter(DocumentChunk.document_id == document.id)
@@ -43,19 +51,20 @@ def process_document(
 
         db.flush()
 
-        for chunk in chunks:
+        for index, chunk in enumerate(chunks):
             document_chunk = DocumentChunk(
                 document_id=document.id,
                 organization_id=document.organization_id,
                 chunk_index=chunk["chunk_index"],
                 content=chunk["content"],
+                embedding=embeddings[index],
                 page_number=chunk["page_number"],
                 sheet_name=chunk["sheet_name"],
                 source_type=chunk["source_type"],
             )
 
             db.add(document_chunk)
-
+            
         document.status = DocumentStatus.COMPLETED.value
         db.commit()
         db.refresh(document)

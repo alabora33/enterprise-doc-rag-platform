@@ -17,6 +17,11 @@ class Settings(BaseSettings):
 
     UPLOAD_DIR: str = "uploads"
     
+    EMBEDDING_PROVIDER: str = "gemini"
+    GEMINI_API_KEY: str | None = None
+    EMBEDDING_MODEL: str = "gemini-embedding-001"
+    EMBEDDING_DIMENSION: int = 1536
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
