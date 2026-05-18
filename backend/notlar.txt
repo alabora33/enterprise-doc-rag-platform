@@ -2842,3 +2842,459 @@ TEKNIK BORÇ / SONRAKI ADIMLAR:
   - Token kullanım takibi: Gemini API harcamasını DB'ye yazma.
 
 ========================================================
+
+========================================================
+COMMIT: "Add chat history tables"
+— SOHBET GEÇMİŞİ KATMANININ EKLENMESİ
+========================================================
+
+Bu commit ile sistemin sohbet geçmişi altyapısı kuruldu.
+Artık kullanıcıların sorduğu sorular ve sistemin ürettiği cevaplar
+oturum (session) bazında veritabanında saklanıyor. Her cevabın
+hangi kaynak chunk'lardan üretildiği de kayıt altına alınıyor.
+
+Etkilenen dosyalar (migration hariç):
+  GÜNCELLEME : models/__init__.py
+  GÜNCELLEME : schemas/chat.py    (session_id alanı + yeni şemalar)
+  GÜNCELLEME : api/v1/chat.py     (session yönetimi eklendi)
+  YENİ       : models/chat.py
+  YENİ       : services/chat_history_service.py
+  YENİ       : alembic/versions/2d176fb1b7b2_add_chat_history_tables.py
+
+========================================================
+MODELS/CHAT.PY — YENİ: CHAT GEÇMİŞİ MODELLERİ
+========================================================
+
+## ChatMessageRole(str, Enum)
+
+class ChatMessageRole(str, Enum):
+    USER      = "user"
+    ASSISTANT = "assistant"
+
+  str, Enum kombinasyonu neden?
+    → str  : DB'ye "user"/"assistant" string olarak yazılır,
+             JSON serialize olur, karşılaştırma doğal çalışır.
+    → Enum : "useer" gibi typo ile geçersiz rol atanması önlenir.
+    → Sadece iki rol var: kullanıcı mesajı veya asistan cevabı.
+      OpenAI/Gemini API sözleşmesiyle uyumlu isimler seçildi.
+
+## ChatSession(Base) — "chat_sessions" tablosu
+
+  Bir sohbet oturumunu temsil eder. Kullanıcı her yeni konuya
+  başladığında yeni bir session açılır, sonraki mesajlar aynı
+  session'a bağlanır.
+
+  organization_id: ForeignKey("organizations.id", ondelete="CASCADE")
+    → Her session bir organizasyona aittir.
+    → ondelete="CASCADE": Organizasyon silinince o organizasyonun
+      tüm sohbet geçmişi de silinir. Orphan kayıt kalmaz.
+    → index=True: "Bu organizasyonun tüm oturumları" sorgusu için.
+
+  user_id: ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    → Session'ı başlatan kullanıcıyı tutar.
+    → ondelete="SET NULL" (CASCADE değil): Kullanıcı silinse bile
+      sohbet geçmişi korunur, user_id NULL olur.
+    → nullable=True: Sistem tarafından başlatılan sohbetlere
+      esneklik bırakıldı (şu an kullanılmıyor ama mimari açık).
+
+  title: String(255), nullable=True
+    → Oturumun başlığı. Şu an ilk sorunun ilk 80 karakteri kullanılır.
+    → NULL bırakılabilir: başlık sonradan da set edilebilir.
+    → Kullanıcıya sohbet listesinde gösterilecek.
+
+  created_at / updated_at: DateTime, default=datetime.utcnow
+    → updated_at onupdate: Yeni mesaj eklendikçe güncellenir.
+    → list_chat_sessions() ORDER BY updated_at.desc() ile
+      en son aktif oturum önce gelir.
+
+  messages = relationship("ChatMessage", cascade="all, delete-orphan")
+    → session.messages ile tüm mesajlara ORM üzerinden erişilir.
+    → cascade="all, delete-orphan": Session silinince mesajlar da silinir.
+    → back_populates="session": iki yönlü ilişki (ChatMessage.session).
+
+## ChatMessage(Base) — "chat_messages" tablosu
+
+  Bir oturum içindeki tek bir mesajı temsil eder.
+  Hem kullanıcı soruları hem asistan cevapları burada saklanır.
+
+  session_id: ForeignKey("chat_sessions.id", ondelete="CASCADE")
+    → Hangi oturuma ait olduğu.
+    → ondelete="CASCADE": Session silinince mesajlar da silinir.
+    → index=True: "Bu session'ın mesajları" sorgusu için.
+
+  role: String(50), nullable=False, index=True
+    → "user" veya "assistant" string değeri.
+    → ChatMessageRole.value ile set edilir.
+    → index=True: Role göre filtreleme yapılabilir
+      (ör: "sadece asistan mesajlarını getir").
+
+  content: Text, nullable=False
+    → Mesajın gerçek içeriği. Text tipi: uzun cevaplar için sınırsız.
+    → String(N) kullanılmadı: LLM cevabı 4000 karakter olabilir.
+
+  sources = relationship("ChatSource", cascade="all, delete-orphan")
+    → Bir asistan mesajına bağlı kaynak chunk'lar.
+    → Kullanıcı mesajlarının sources listesi boş olur (sadece
+      asistan mesajları kaynak barındırır).
+
+## ChatSource(Base) — "chat_sources" tablosu
+
+  Bir asistan mesajını destekleyen kaynak chunk'ı temsil eder.
+  RAG'ın "kaynaklı cevap" özelliğinin veritabanı yansıması.
+
+  message_id: ForeignKey("chat_messages.id", ondelete="CASCADE")
+    → Hangi asistan mesajına ait.
+    → ondelete="CASCADE": Mesaj silinince kaynaklar da silinir.
+
+  document_id: ForeignKey("documents.id", ondelete="CASCADE")
+    → Kaynak doküman. Doküman silinirse bu kayıt da silinir.
+
+  chunk_id: ForeignKey("document_chunks.id", ondelete="CASCADE")
+    → Hangi chunk kullanıldı. Chunk silinirse bu kayıt da silinir.
+
+  original_file_name: String(255), nullable=False
+    → Gösterim için dosya adı. Document silinse bile adı kalır mı?
+      Hayır, ondelete="CASCADE" ile bu kayıt da silinir.
+      Var olduğu sürece orijinal ad tutulur.
+
+  chunk_index: Integer, nullable=False
+    → Chunk'ın belgedeki sırası. Debug ve kaynak atıfı için.
+
+  page_number: Integer, nullable=True
+    → PDF için sayfa numarası. Diğer dosya türlerinde NULL.
+
+  sheet_name: String(255), nullable=True
+    → Excel için sheet adı. Diğer dosya türlerinde NULL.
+
+  source_type: String(50), nullable=True
+    → "pdf", "docx", "xlsx", "txt". UI'da ikon/etiket için.
+
+  similarity_score: Float, nullable=False
+    → Bu chunk'ın soruyla olan benzerlik skoru (0-1 arası).
+    → UI'da güven çubuğu veya "yüzde kaç alakalı" gösterimi için.
+
+========================================================
+MODELS/__INIT__.PY — GÜNCELLEME
+========================================================
+
+Önceki __all__:
+  ["User", "Organization", "UserOrganizationRole",
+   "Document", "DocumentChunk"]
+
+Yeni __all__:
+  ["User", "Organization", "UserOrganizationRole",
+   "Document", "DocumentChunk",
+   "ChatSession", "ChatMessage", "ChatSource"]
+
+Eklenen import satırı:
+  from app.models.chat import ChatSession, ChatMessage, ChatSource
+
+  Neden zorunlu?
+    → Alembic Base.metadata'yı tarar. chat.py hiçbir yerden
+      import edilmeseydi 3 yeni tablo migration'da görünmezdi.
+    → Bu satır Alembic'in üç tabloyu fark etmesini sağladı.
+
+========================================================
+SCHEMAS/CHAT.PY — GÜNCELLEME: SESSION DESTEĞİ EKLENDİ
+========================================================
+
+## ChatRequest — DEĞİŞİKLİK
+
+Yeni alan:
+  session_id: int | None = None
+
+  Neden eklendi?
+    → Mevcut bir oturuma devam etmek için client session_id gönderir.
+    → None gönderilirse yeni oturum otomatik oluşturulur.
+    → Opsiyonel (None default): API geriye dönük uyumlu kaldı.
+      Eski istemciler session_id göndermeden çalışmaya devam eder.
+
+## ChatMessageRead — YENİ ŞEMA
+  id, session_id, role, content, created_at
+  model_config = {"from_attributes": True}
+
+  GET /chat/sessions/{session_id} endpoint'inin mesaj listesi için.
+  Kullanıcı geçmiş sohbeti görüntüleyebilir.
+
+## ChatSessionRead — YENİ ŞEMA
+  id, organization_id, user_id, title, created_at, updated_at
+  model_config = {"from_attributes": True}
+
+  GET /chat/sessions listesinin her elemanı için.
+  Kullanıcı oturum listesini (başlık + tarih) görebilir.
+
+## ChatSessionDetail — YENİ ŞEMA
+  ChatSessionRead'den kalıtım alır.
+  messages: list[ChatMessageRead] alanı eklendi.
+
+  GET /chat/sessions/{session_id} endpoint'inin tam yanıt şeması.
+  Oturum bilgisi + altındaki tüm mesajlar tek request'te gelir.
+
+  Neden iki ayrı şema (ChatSessionRead vs ChatSessionDetail)?
+    → Liste endpoint'inde mesaj içeriklerini döndürmek gerekmez.
+      Binlerce mesajlı oturum listesi gereksiz veri taşır.
+    → Detail endpoint'inde tam geçmiş isteniyor.
+    → İki ayrı şema ile her endpoint tam ihtiyacı kadar veri döner.
+
+========================================================
+SERVICES/CHAT_HISTORY_SERVICE.PY — YENİ DOSYA
+========================================================
+
+## GENEL AMAÇ
+Chat geçmişine ait tüm veritabanı işlemlerini tek bir service
+altında toplar. API katmanı doğrudan ORM nesnesi yaratmaz,
+bu servisi çağırır.
+
+## create_chat_session(db, organization_id, user_id, title) → ChatSession
+
+  ChatSession ORM nesnesi oluşturur, db.add eder, db.flush() çağırır.
+
+  db.flush() neden (commit değil)?
+    → Çağıran (api/v1/chat.py) tüm işlemleri tek bir db.commit()
+      ile sonlandırır. flush() ile session.id alınır (sequence
+      ID üretildi) ama transaction henüz kapatılmaz.
+    → Mesaj veya kaynak kaydı başarısız olursa session da geri alınır.
+    → Atomicity: session + mesaj + kaynaklar ya hepsi ya hiçbiri.
+
+## get_chat_session_by_id(db, session_id, organization_id, user_id)
+   → ChatSession | None
+
+  Üç filtre birlikte kullanılır:
+    ChatSession.id == session_id
+    ChatSession.organization_id == organization_id
+    ChatSession.user_id == user_id
+
+  Neden üç filtre?
+    → Sadece id filtresi kullansaydık başka kullanıcının
+      session_id'sini bilerek ona mesaj eklenebilirdi.
+    → organization_id: başka organizasyonun oturumuna erişim engeli.
+    → user_id: aynı organizasyonun başka kullanıcısının
+      oturumuna erişim engeli.
+    → Tüm filtrelerin aynı anda geçmesi zorunlu.
+
+## list_chat_sessions(db, organization_id, user_id)
+   → list[ChatSession]
+
+  İki filtre: organization_id ve user_id.
+  ORDER BY updated_at.desc(): En son mesaj alınan oturum önce.
+  UI'da WhatsApp/mesaj uygulaması gibi sıralama.
+
+## create_chat_message(db, session_id, role, content) → ChatMessage
+
+  role=ChatMessageRole.USER veya ChatMessageRole.ASSISTANT alır.
+  DB'ye role.value (string) yazılır, Enum değeri değil.
+  db.flush(): session kaydında olduğu gibi transaction açık kalır.
+
+## create_chat_sources(db, message_id, sources) → list[ChatSource]
+
+  sources: list[dict] alır (rag_service.py'den dönen format).
+  Her dict için bir ChatSource ORM nesnesi oluşturur.
+  db.flush(): tüm kaynaklar eklendikten sonra toplu flush.
+  Neden liste döner?
+    → Şu an dönüş değeri kullanılmıyor ama ileride
+      "hangi kaynaklar eklendi" bilgisi lazım olabilir.
+
+========================================================
+API/V1/CHAT.PY — GÜNCELLEME: SESSION YÖNETİMİ EKLENDİ
+========================================================
+
+## POST /api/v1/chat — BÜYÜK DEĞİŞİKLİK
+
+Önceki hal:
+  RAG sonucu hesaplanır, direkt ChatResponse döner.
+  Hiçbir şey veritabanına kaydedilmez.
+
+Yeni hal:
+  1. session_id varsa → mevcut session doğrula (404 kontrolü)
+  2. session_id yoksa → yeni session oluştur (başlık = sorunun ilk 80 karakteri)
+  3. Kullanıcı mesajını kaydet (role=USER)
+  4. RAG pipeline çalıştır → cevap + kaynaklar
+  5. Asistan mesajını kaydet (role=ASSISTANT)
+  6. Kaynak chunk'ları kaydet (ChatSource)
+  7. db.commit() — her şey tek transaction
+  8. ChatResponse döner
+
+  Neden başlık sorunun ilk 80 karakteri?
+    → Kullanıcıya anlamlı başlık göstermek için.
+    → Otomatik üretim: kullanıcıdan başlık girmesi istenmez.
+    → 80 karakter: liste görünümünde kesilmeden gösterilebilir.
+    → İleride LLM ile özet başlık üretilebilir.
+
+  Neden session_id yoksa 404 fırlatılıyor?
+    → client başka bir kullanıcıya ait session_id gönderse,
+      organizasyon veya user_id eşleşmezse None döner → 404.
+    → Güvenlik: yanlış session'a mesaj eklenemez.
+
+  db.commit() neden en sonda, tek seferde?
+    → Kullanıcı mesajı, RAG, asistan mesajı, kaynaklar: hepsi
+      ya birlikte yazılır ya da hiç yazılmaz.
+    → RAG pipeline hata verirse hiçbir mesaj DB'ye gitmez,
+      tutarsız (sorusu olan ama cevabı olmayan) kayıt oluşmaz.
+
+## GET /api/v1/chat/sessions — YENİ ENDPOINT
+
+  response_model=list[ChatSessionRead]
+  list_chat_sessions(db, org_id, user_id) çağırır.
+  Giriş yapmış kullanıcının tüm oturumlarını döner.
+  Başlık + tarih bilgisi → sohbet listesi ekranı için.
+
+## GET /api/v1/chat/sessions/{session_id} — YENİ ENDPOINT
+
+  response_model=ChatSessionDetail
+  get_chat_session_by_id() → 404 kontrolü → return session
+
+  ChatSessionDetail içinde messages alanı var.
+  SQLAlchemy lazy load ile session.messages otomatik yüklenir.
+  Tüm sohbet geçmişi tek istekte gelir.
+
+  Neden messages ayrı endpoint'te değil, bu yanıtta?
+    → Sohbet ekranı açıldığında hem oturum bilgisi hem de tüm
+      mesajlar aynı anda lazım. İki ayrı istek yerine tek istek
+      daha iyi kullanıcı deneyimi ve daha az ağ gecikmesi.
+
+========================================================
+ALEMBİC MİGRASYONU: 2d176fb1b7b2_add_chat_history_tables.py
+========================================================
+
+  Revision    : 2d176fb1b7b2
+  Revises     : 7914a55ba2b2 (embedding kolonu migration'ı)
+  Create Date : 2026-05-18 15:59:28
+
+  upgrade() ile oluşturulan tablolar ve yapılar:
+
+  1. chat_sessions tablosu
+       id, organization_id, user_id, title, created_at, updated_at
+       FK: organization_id → organizations.id (ondelete=CASCADE)
+       FK: user_id → users.id (ondelete=SET NULL)
+       Index'ler:
+         ix_chat_sessions_id
+         ix_chat_sessions_organization_id
+         ix_chat_sessions_user_id
+
+  2. chat_messages tablosu
+       id, session_id, role, content, created_at
+       FK: session_id → chat_sessions.id (ondelete=CASCADE)
+       Index'ler:
+         ix_chat_messages_id
+         ix_chat_messages_session_id
+         ix_chat_messages_role
+
+  3. chat_sources tablosu
+       id, message_id, document_id, chunk_id
+       original_file_name, chunk_index, page_number,
+       sheet_name, source_type, similarity_score, created_at
+       FK: message_id → chat_messages.id (ondelete=CASCADE)
+       FK: document_id → documents.id (ondelete=CASCADE)
+       FK: chunk_id → document_chunks.id (ondelete=CASCADE)
+       Index'ler:
+         ix_chat_sources_id
+         ix_chat_sources_message_id
+         ix_chat_sources_document_id
+         ix_chat_sources_chunk_id
+
+  downgrade(): Ters sırayla tablo ve index'ler drop edilir.
+    chat_sources → chat_messages → chat_sessions
+    (FK bağımlılığı nedeniyle alt tablo önce silinmeli)
+
+  Çalıştırılan komutlar (Windows terminalinden):
+
+    alembic revision --autogenerate -m "add chat history tables"
+      → Mevcut modeller ile DB şeması karşılaştırıldı.
+      → 3 yeni tablo ve 11 yeni index tespit edildi.
+      → 2d176fb1b7b2_add_chat_history_tables.py dosyası oluşturuldu.
+
+    alembic upgrade head
+      → Önceki migration (7914a55ba2b2) → yeni migration (2d176fb1b7b2)
+        geçişi uygulandı.
+      → PostgreSQL'de 3 tablo ve 11 index fiziksel olarak oluşturuldu.
+
+  Terminalde görülen collation uyarısı hakkında:
+    WARNING: database "rag_db" has a collation version mismatch
+    → Veri bozulması veya hata DEĞİL, sadece uyarı.
+    → DB PostgreSQL 2.41 collation ile oluşturulmuş,
+      mevcut sistem kütüphanesi 2.36 sürümünü sunuyor.
+    → Migration çalışmasını engellemedi, tüm tablolar başarıyla oluştu.
+    → Düzeltmek için: ALTER DATABASE rag_db REFRESH COLLATION VERSION;
+      (Zorunlu değil, production'da dikkat edilmeli.)
+
+========================================================
+TABLO İLİŞKİ ZİNCİRİ — CASCADE SİLME AKIŞI
+========================================================
+
+  organizations silinirse:
+    → chat_sessions (CASCADE)
+        → chat_messages (CASCADE)
+            → chat_sources (CASCADE)
+    → documents (CASCADE)
+        → document_chunks (CASCADE) → chat_sources (CASCADE)
+
+  users silinirse:
+    → chat_sessions.user_id = NULL (SET NULL, session korunur)
+    → documents.uploaded_by_user_id = NULL (SET NULL)
+
+  documents silinirse:
+    → document_chunks (CASCADE) → chat_sources (CASCADE)
+    → chat_sources.document_id (CASCADE, doğrudan)
+
+  document_chunks silinirse:
+    → chat_sources.chunk_id (CASCADE)
+
+  Tasarım kararı:
+    → Kullanıcı silinse bile organizasyonun sohbet geçmişi korunur.
+    → Doküman silinse bile mesajın kendisi (ChatMessage.content) korunur,
+      sadece o mesajın kaynakları (ChatSource) temizlenir.
+
+========================================================
+YENİ URL TABLOSU (GÜNCELLENMİŞ TAM LİSTE)
+========================================================
+
+  POST /api/v1/auth/register              → kayıt
+  POST /api/v1/auth/login                 → giriş
+  GET  /api/v1/users/me                   → profil
+  GET  /api/v1/organizations/me           → organizasyonlar
+  POST /api/v1/documents/upload           → dosya yükle
+  GET  /api/v1/documents                  → dosya listesi
+  GET  /api/v1/documents/{id}             → dosya detayı
+  GET  /api/v1/documents/{id}/chunks      → chunk listesi
+  POST /api/v1/search                     → semantik arama
+  POST /api/v1/chat                       → RAG soru-cevap (+ session)
+  GET  /api/v1/chat/sessions              → sohbet oturumu listesi
+  GET  /api/v1/chat/sessions/{id}         → oturum detayı + mesajlar
+
+========================================================
+CHAT ENDPOINT'İNİN GÜNCEL TAM AKIŞI
+========================================================
+
+POST /api/v1/chat {"question": "...", "top_k": 5, "session_id": null}
+        ↓
+get_current_user() → token doğrulama
+        ↓
+get_current_user_primary_organization_id() → org_id
+        ↓
+session_id var mı?
+  EVET → get_chat_session_by_id() → bulunamadı? → 404
+  HAYIR → create_chat_session(title=soru[:80]) → flush
+        ↓
+create_chat_message(role=USER, content=soru) → flush
+        ↓
+answer_question_with_rag(db, org_id, soru, top_k)
+  ├── create_embedding(soru) → query vektörü
+  ├── cosine_distance sorgusu → top_k chunk
+  ├── build_context_from_search_results() → context metni
+  └── generate_answer_with_context() → Gemini → cevap
+        ↓
+create_chat_message(role=ASSISTANT, content=cevap) → flush
+        ↓
+create_chat_sources(message_id, sources=[...]) → flush
+        ↓
+db.commit() — tek transaction (session + 2 mesaj + kaynaklar)
+        ↓
+{
+  "session_id": 1,
+  "answer": "...",
+  "sources": [{"original_file_name": "...", "page_number": ..., ...}]
+}
+
+========================================================
+
+
