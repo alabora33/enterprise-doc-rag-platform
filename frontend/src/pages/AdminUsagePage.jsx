@@ -1,14 +1,6 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import axiosClient from "../api/axiosClient";
-
-const actionLabels = {
-  document_upload: "Document Upload",
-  document_retry: "Document Retry",
-  document_processing_completed: "Processing Completed",
-  document_processing_failed: "Processing Failed",
-  semantic_search: "Semantic Search",
-  rag_chat: "RAG Chat",
-};
 
 const actionClasses = {
   document_upload: "bg-blue-50 text-blue-700 border-blue-200",
@@ -20,6 +12,7 @@ const actionClasses = {
 };
 
 export default function AdminUsagePage() {
+  const { t } = useTranslation();
   const [summary, setSummary] = useState(null);
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -40,10 +33,10 @@ export default function AdminUsagePage() {
     } catch (err) {
       if (err.response?.status === 403) {
         setError(
-          "Bu ekranı görüntülemek için admin yetkisi gerekiyor. Kullanıcının is_superuser değeri true olmalı."
+          t("admin.errorForbidden")
         );
       } else {
-        setError("Usage verileri alınırken hata oluştu.");
+        setError(t("admin.errorFetch"));
       }
     } finally {
       setLoading(false);
@@ -61,51 +54,15 @@ export default function AdminUsagePage() {
 
   const metricCards = summary
     ? [
-        {
-          title: "Total Documents",
-          value: summary.total_documents,
-          description: "Sisteme yüklenen doküman sayısı",
-        },
-        {
-          title: "Total Chunks",
-          value: summary.total_chunks,
-          description: "Dokümanlardan çıkarılan metin parçaları",
-        },
-        {
-          title: "Chat Sessions",
-          value: summary.total_chat_sessions,
-          description: "Toplam konuşma oturumu",
-        },
-        {
-          title: "Chat Messages",
-          value: summary.total_chat_messages,
-          description: "User + assistant mesajları",
-        },
-        {
-          title: "Usage Logs",
-          value: summary.total_usage_logs,
-          description: "Toplam kullanım kaydı",
-        },
-        {
-          title: "Uploads",
-          value: summary.document_upload_count,
-          description: "Doküman yükleme aksiyonları",
-        },
-        {
-          title: "Semantic Searches",
-          value: summary.semantic_search_count,
-          description: "Semantik arama sayısı",
-        },
-        {
-          title: "RAG Chats",
-          value: summary.rag_chat_count,
-          description: "RAG cevap üretme sayısı",
-        },
-        {
-          title: "Retries",
-          value: summary.document_retry_count,
-          description: "Yeniden işleme sayısı",
-        },
+        { title: t("admin.metrics.totalDocuments"), value: summary.total_documents, description: t("admin.metrics.totalDocumentsDesc") },
+        { title: t("admin.metrics.totalChunks"), value: summary.total_chunks, description: t("admin.metrics.totalChunksDesc") },
+        { title: t("admin.metrics.chatSessions"), value: summary.total_chat_sessions, description: t("admin.metrics.chatSessionsDesc") },
+        { title: t("admin.metrics.chatMessages"), value: summary.total_chat_messages, description: t("admin.metrics.chatMessagesDesc") },
+        { title: t("admin.metrics.usageLogs"), value: summary.total_usage_logs, description: t("admin.metrics.usageLogsDesc") },
+        { title: t("admin.metrics.uploads"), value: summary.document_upload_count, description: t("admin.metrics.uploadsDesc") },
+        { title: t("admin.metrics.semanticSearches"), value: summary.semantic_search_count, description: t("admin.metrics.semanticSearchesDesc") },
+        { title: t("admin.metrics.ragChats"), value: summary.rag_chat_count, description: t("admin.metrics.ragChatsDesc") },
+        { title: t("admin.metrics.retries"), value: summary.document_retry_count, description: t("admin.metrics.retriesDesc") },
       ]
     : [];
 
@@ -113,9 +70,9 @@ export default function AdminUsagePage() {
     <div>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-slate-900">Admin Usage</h2>
+          <h2 className="text-2xl font-bold text-slate-900">{t("admin.title")}</h2>
           <p className="mt-2 text-slate-500">
-            Sistem kullanım metriklerini ve son kullanıcı aksiyonlarını izle.
+            {t("admin.subtitle")}
           </p>
         </div>
 
@@ -123,7 +80,7 @@ export default function AdminUsagePage() {
           onClick={fetchUsageData}
           className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
         >
-          Refresh
+          {t("admin.refresh")}
         </button>
       </div>
 
@@ -135,7 +92,7 @@ export default function AdminUsagePage() {
 
       {loading && (
         <div className="mt-6 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500">
-          Usage verileri yükleniyor...
+          {t("admin.loading")}
         </div>
       )}
 
@@ -161,10 +118,10 @@ export default function AdminUsagePage() {
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-semibold text-slate-900">
-                  Recent Usage Logs
+                  {t("admin.recentLogs")}
                 </h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  Son 100 kullanım kaydı.
+                  {t("admin.recentLogsSubtitle")}
                 </p>
               </div>
             </div>
@@ -174,22 +131,22 @@ export default function AdminUsagePage() {
                 <thead className="bg-slate-50">
                   <tr>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Action
+                      {t("admin.colAction")}
                     </th>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      User
+                      {t("admin.colUser")}
                     </th>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Organization
+                      {t("admin.colOrg")}
                     </th>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Resource
+                      {t("admin.colResource")}
                     </th>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Detail
+                      {t("admin.colDetail")}
                     </th>
                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      Created At
+                      {t("admin.colCreatedAt")}
                     </th>
                   </tr>
                 </thead>
@@ -201,7 +158,7 @@ export default function AdminUsagePage() {
                         colSpan="6"
                         className="px-4 py-8 text-center text-sm text-slate-500"
                       >
-                        Henüz usage log yok.
+                        {t("admin.noLogs")}
                       </td>
                     </tr>
                   )}
@@ -215,7 +172,7 @@ export default function AdminUsagePage() {
                             "border-slate-200 bg-slate-50 text-slate-700"
                           }`}
                         >
-                          {actionLabels[log.action] || log.action}
+                          {t(`admin.actions.${log.action}`) || log.action}
                         </span>
                       </td>
 

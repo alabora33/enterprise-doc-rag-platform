@@ -6,7 +6,7 @@ import axiosClient from "../api/axiosClient";
 export default function DashboardLayout() {
   const navigate = useNavigate();
   const [user, setUser] = useState(null);
-  const { i18n } = useTranslation();
+  const { i18n, t } = useTranslation();
 
   const toggleLanguage = () => {
     const next = i18n.language === "tr" ? "en" : "tr";
@@ -40,10 +40,10 @@ export default function DashboardLayout() {
       <aside className="fixed left-0 top-0 h-full w-64 bg-slate-900 text-white">
         <div className="border-b border-slate-700 p-6">
           <h1 className="text-xl font-bold">
-            {isAdmin ? "Admin Panel" : "Enterprise RAG"}
+            {isAdmin ? t("nav.adminPanel") : t("nav.appTitle")}
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            {isAdmin ? "System Monitoring" : "Document Intelligence"}
+            {isAdmin ? t("nav.adminSubtitle") : t("nav.appSubtitle")}
           </p>
         </div>
 
@@ -54,7 +54,7 @@ export default function DashboardLayout() {
                 to="/admin/usage"
                 className="block rounded-lg px-4 py-2 hover:bg-slate-800"
               >
-                Admin Usage
+                {t("nav.adminUsage")}
               </Link>
             </>
           ) : (
@@ -63,21 +63,21 @@ export default function DashboardLayout() {
                 to="/dashboard"
                 className="block rounded-lg px-4 py-2 hover:bg-slate-800"
               >
-                Dashboard
+                {t("nav.dashboard")}
               </Link>
 
               <Link
                 to="/documents"
                 className="block rounded-lg px-4 py-2 hover:bg-slate-800"
               >
-                Documents
+                {t("nav.documents")}
               </Link>
 
               <Link
                 to="/chat"
                 className="block rounded-lg px-4 py-2 hover:bg-slate-800"
               >
-                Chat
+                {t("nav.chat")}
               </Link>
             </>
           )}
@@ -88,7 +88,7 @@ export default function DashboardLayout() {
             <div className="mb-4 rounded-lg bg-slate-800 px-3 py-3 text-xs text-slate-300">
               <p className="truncate">{user.email}</p>
               <p className="mt-1">
-                Role: {user.is_superuser ? "Admin" : "User"}
+                {t("nav.role")}: {user.is_superuser ? t("nav.roleAdmin") : t("nav.roleUser")}
               </p>
             </div>
           )}
@@ -107,7 +107,7 @@ export default function DashboardLayout() {
             onClick={handleLogout}
             className="w-full rounded-lg bg-red-600 px-4 py-2 text-sm font-medium hover:bg-red-700"
           >
-            Logout
+            {t("nav.logout")}
           </button>
         </div>
       </aside>

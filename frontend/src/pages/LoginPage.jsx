@@ -105,9 +105,9 @@ export default function LoginPage() {
           </button>
         </form>
         <p className="mt-6 text-center text-sm text-slate-500">
-           Hesabın yok mu?{" "}
+           {t("login.noAccount")}{" "}
           <Link to="/register" className="font-medium text-slate-900 underline">
-            Register
+            {t("login.registerLink")}
           </Link>
         </p>  
         <div className="mt-6 flex justify-center">

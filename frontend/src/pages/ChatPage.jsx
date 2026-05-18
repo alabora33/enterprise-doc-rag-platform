@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import axiosClient from "../api/axiosClient";
 
 export default function ChatPage() {
+  const { t } = useTranslation();
   const [sessions, setSessions] = useState([]);
   const [currentSessionId, setCurrentSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -20,7 +22,7 @@ export default function ChatPage() {
       const response = await axiosClient.get("/chat/sessions");
       setSessions(response.data);
     } catch (err) {
-      setError("Konuşma geçmişi alınırken hata oluştu.");
+      setError(t("chat.errors.fetchSessions"));
     } finally {
       setLoadingSessions(false);
     }
@@ -48,7 +50,7 @@ export default function ChatPage() {
       const response = await axiosClient.get(`/chat/sessions/${sessionId}`);
       setMessages(response.data.messages || []);
     } catch (err) {
-      setError("Konuşma detayı alınırken hata oluştu.");
+      setError(t("chat.errors.fetchSessionDetail"));
     } finally {
       setLoadingSessionDetail(false);
     }
@@ -58,7 +60,7 @@ export default function ChatPage() {
     event.preventDefault();
 
     if (!question.trim()) {
-      setError("Lütfen bir soru yaz.");
+      setError(t("chat.errors.noQuestion"));
       return;
     }
 
@@ -107,7 +109,7 @@ export default function ChatPage() {
 
       await fetchSessions();
     } catch (err) {
-      setError("Cevap üretilirken hata oluştu.");
+      setError(t("chat.errors.sendFailed"));
 
       setMessages((currentMessages) =>
         currentMessages.filter(
@@ -129,9 +131,9 @@ export default function ChatPage() {
     <div>
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-slate-900">Chat</h2>
+          <h2 className="text-2xl font-bold text-slate-900">{t("chat.title")}</h2>
           <p className="mt-2 text-slate-500">
-            Dokümanlarına soru sor, kaynaklı RAG cevabı al.
+            {t("chat.subtitle")}
           </p>
         </div>
 
@@ -139,7 +141,7 @@ export default function ChatPage() {
           onClick={startNewChat}
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
         >
-          New Chat
+          {t("chat.newChat")}
         </button>
       </div>
 
@@ -152,17 +154,17 @@ export default function ChatPage() {
       <div className="mt-8 grid gap-6 lg:grid-cols-4">
         <aside className="rounded-2xl bg-white p-5 shadow lg:col-span-1">
           <div className="flex items-center justify-between">
-            <h3 className="font-semibold text-slate-900">Chat Sessions</h3>
+            <h3 className="font-semibold text-slate-900">{t("chat.sessions")}</h3>
 
             {loadingSessions && (
-              <span className="text-xs text-slate-500">Loading...</span>
+              <span className="text-xs text-slate-500">{t("chat.loading")}</span>
             )}
           </div>
 
           <div className="mt-4 space-y-2">
             {sessions.length === 0 && (
               <p className="rounded-lg bg-slate-50 px-3 py-3 text-sm text-slate-500">
-                Henüz konuşma yok.
+                {t("chat.noSessions")}
               </p>
             )}
 
@@ -198,26 +200,26 @@ export default function ChatPage() {
             <h3 className="font-semibold text-slate-900">
               {currentSessionId
                 ? `Session #${currentSessionId}`
-                : "New Conversation"}
+                : t("chat.newConversation")}
             </h3>
             <p className="mt-1 text-sm text-slate-500">
-              Cevaplar sadece yüklediğin dokümanlardan bulunan kaynaklara göre üretilir.
+              {t("chat.responseNote")}
             </p>
           </div>
 
           <div className="h-[520px] overflow-y-auto bg-slate-50 px-6 py-6">
             {loadingSessionDetail && (
-              <p className="text-sm text-slate-500">Konuşma yükleniyor...</p>
+              <p className="text-sm text-slate-500">{t("chat.loadingConversation")}</p>
             )}
 
             {!loadingSessionDetail && messages.length === 0 && (
               <div className="flex h-full items-center justify-center">
                 <div className="max-w-md text-center">
                   <h4 className="text-lg font-semibold text-slate-900">
-                    Dokümanlarınla konuşmaya başla
+                    {t("chat.startTitle")}
                   </h4>
                   <p className="mt-2 text-sm text-slate-500">
-                    Örneğin: “Bu sözleşmede fesih şartları nelerdir?”
+                    {t("chat.startExample")}
                   </p>
                 </div>
               </div>
@@ -239,7 +241,7 @@ export default function ChatPage() {
                     }`}
                   >
                     <div className="mb-2 text-xs font-semibold uppercase tracking-wide opacity-70">
-                      {message.role === "user" ? "You" : "Assistant"}
+                      {message.role === "user" ? t("chat.you") : t("chat.assistant")}
                     </div>
 
                     <p className="whitespace-pre-wrap text-sm leading-6">
@@ -249,7 +251,7 @@ export default function ChatPage() {
                     {message.sources && message.sources.length > 0 && (
                       <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-slate-700">
                         <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                          Sources
+                          {t("chat.sources")}
                         </p>
 
                         <div className="space-y-3">
@@ -263,19 +265,19 @@ export default function ChatPage() {
                               </p>
 
                               <div className="mt-1 flex flex-wrap gap-2 text-xs text-slate-500">
-                                <span>Document ID: {source.document_id}</span>
-                                <span>Chunk: {source.chunk_index}</span>
+                                <span>{t("chat.docId")}: {source.document_id}</span>
+                                <span>{t("chat.chunk")}: {source.chunk_index}</span>
 
                                 {source.page_number && (
-                                  <span>Page: {source.page_number}</span>
+                                  <span>{t("chat.page")}: {source.page_number}</span>
                                 )}
 
                                 {source.sheet_name && (
-                                  <span>Sheet: {source.sheet_name}</span>
+                                  <span>{t("chat.sheet")}: {source.sheet_name}</span>
                                 )}
 
                                 <span>
-                                  Score: {source.similarity_score.toFixed(3)}
+                                  {t("chat.score")}: {source.similarity_score.toFixed(3)}
                                 </span>
                               </div>
                             </div>
@@ -290,7 +292,7 @@ export default function ChatPage() {
               {sending && (
                 <div className="flex justify-start">
                   <div className="rounded-2xl bg-white px-5 py-4 text-sm text-slate-500 shadow-sm">
-                    Cevap üretiliyor...
+                    {t("chat.generating")}
                   </div>
                 </div>
               )}
@@ -318,7 +320,7 @@ export default function ChatPage() {
               </select>
 
               <span className="text-xs text-slate-500">
-                Cevap için kaç kaynak chunk getirilsin?
+                {t("chat.topKHint")}
               </span>
             </div>
 
@@ -327,7 +329,7 @@ export default function ChatPage() {
                 value={question}
                 onChange={(event) => setQuestion(event.target.value)}
                 rows="2"
-                placeholder="Dokümanların hakkında soru sor..."
+                placeholder={t("chat.placeholder")}
                 className="min-h-[52px] flex-1 resize-none rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-900"
               />
 
@@ -336,7 +338,7 @@ export default function ChatPage() {
                 disabled={sending}
                 className="rounded-xl bg-slate-900 px-6 py-3 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
               >
-                {sending ? "Sending..." : "Send"}
+                {sending ? t("chat.sending") : t("chat.send")}
               </button>
             </div>
           </form>

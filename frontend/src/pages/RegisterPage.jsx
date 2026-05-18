@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import axiosClient from "../api/axiosClient";
 
 export default function RegisterPage() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
 
   const [form, setForm] = useState({
     email: "",
@@ -35,7 +37,7 @@ export default function RegisterPage() {
     try {
       await axiosClient.post("/auth/register", form);
 
-      setSuccess("Hesap başarıyla oluşturuldu. Login sayfasına yönlendiriliyorsun.");
+      setSuccess(t("register.successMessage"));
 
       setTimeout(() => {
         navigate("/login");
@@ -46,7 +48,7 @@ export default function RegisterPage() {
       if (typeof detail === "string") {
         setError(detail);
       } else {
-        setError("Hesap oluşturulurken hata oluştu.");
+        setError(t("register.errorDefault"));
       }
     } finally {
       setLoading(false);
@@ -58,17 +60,17 @@ export default function RegisterPage() {
       <div className="w-full max-w-lg rounded-2xl bg-white p-8 shadow">
         <div className="mb-8 text-center">
           <h1 className="text-2xl font-bold text-slate-900">
-            Create Account
+            {t("register.title")}
           </h1>
           <p className="mt-2 text-sm text-slate-500">
-            Kurumsal doküman zekâ platformu için yeni hesap oluştur.
+            {t("register.subtitle")}
           </p>
         </div>
 
         <form onSubmit={handleRegister} className="space-y-5">
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">
-              Full Name
+              {t("register.fullName")}
             </label>
             <input
               name="full_name"
@@ -76,13 +78,13 @@ export default function RegisterPage() {
               value={form.full_name}
               onChange={handleChange}
               className="w-full rounded-lg border border-slate-300 px-4 py-2 outline-none focus:border-slate-900"
-              placeholder="Ali Veli"
+              placeholder={t("register.fullNamePlaceholder")}
             />
           </div>
 
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">
-              Email
+              {t("register.email")}
             </label>
             <input
               name="email"
@@ -97,7 +99,7 @@ export default function RegisterPage() {
 
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">
-              Password
+              {t("register.password")}
             </label>
             <input
               name="password"
@@ -105,14 +107,14 @@ export default function RegisterPage() {
               value={form.password}
               onChange={handleChange}
               className="w-full rounded-lg border border-slate-300 px-4 py-2 outline-none focus:border-slate-900"
-              placeholder="En az 6 karakter"
+              placeholder={t("register.passwordPlaceholder")}
               required
             />
           </div>
 
           <div>
             <label className="mb-1 block text-sm font-medium text-slate-700">
-              Organization Name
+              {t("register.orgName")}
             </label>
             <input
               name="organization_name"
@@ -120,7 +122,7 @@ export default function RegisterPage() {
               value={form.organization_name}
               onChange={handleChange}
               className="w-full rounded-lg border border-slate-300 px-4 py-2 outline-none focus:border-slate-900"
-              placeholder="Test Company"
+              placeholder={t("register.orgNamePlaceholder")}
               required
             />
           </div>
@@ -142,14 +144,14 @@ export default function RegisterPage() {
             disabled={loading}
             className="w-full rounded-lg bg-slate-900 px-4 py-2 font-medium text-white hover:bg-slate-800 disabled:opacity-60"
           >
-            {loading ? "Hesap oluşturuluyor..." : "Register"}
+            {loading ? t("register.registering") : t("register.registerButton")}
           </button>
         </form>
 
         <p className="mt-6 text-center text-sm text-slate-500">
-          Zaten hesabın var mı?{" "}
+          {t("register.haveAccount")}{" "}
           <Link to="/login" className="font-medium text-slate-900 underline">
-            Login
+            {t("register.loginLink")}
           </Link>
         </p>
       </div>
