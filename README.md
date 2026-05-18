@@ -1,11 +1,11 @@
 # Enterprise Document RAG Platform
 
-> 🇬🇧 [English](#english) | 🇹🇷 [Türkçe](#türkçe)
+> �🇸 [English](#english) | 🇹🇷 [Türkçe](#türkçe)
 
 ---
 
 <a name="english"></a>
-# 🇬🇧 English
+# �🇸 English
 
 A full-stack, multi-tenant AI-powered document intelligence platform. Upload internal corporate documents, ask source-grounded questions, and get answers backed by real document chunks — with full chat history, organization isolation, and admin monitoring.
 
