@@ -11,6 +11,22 @@ A full-stack, multi-tenant AI-powered document intelligence platform. Upload int
 
 ---
 
+## Screenshots
+
+| Login | Register |
+|---|---|
+| ![Login](docs/screenshots/login.png) | ![Register](docs/screenshots/register.png) |
+
+| Dashboard | Documents |
+|---|---|
+| ![Dashboard](docs/screenshots/dashboard.png) | ![Documents](docs/screenshots/documents.png) |
+
+| Chat | Admin Usage |
+|---|---|
+| ![Chat](docs/screenshots/chat.png) | ![Admin Usage](docs/screenshots/admin-usage.png) |
+
+---
+
 ## Features
 
 ### Authentication & Multi-Tenancy
@@ -238,9 +254,23 @@ Kurumsal şirket içi dokümanları yükleyip, bu dokümanlara kaynak gösterere
 
 ---
 
-## Özellikler
+## Ekran Görüntüleri
 
-### Kimlik Doğrulama & Çok Kiracılı Yapı
+| Giriş | Kayıt |
+|---|---|
+| ![Giriş](docs/screenshots/login.png) | ![Kayıt](docs/screenshots/register.png) |
+
+| Dashboard | Dokümanlar |
+|---|---|
+| ![Dashboard](docs/screenshots/dashboard.png) | ![Dokümanlar](docs/screenshots/documents.png) |
+
+| Sohbet | Admin Kullanım |
+|---|---|
+| ![Sohbet](docs/screenshots/chat.png) | ![Admin Kullanım](docs/screenshots/admin-usage.png) |
+
+---
+
+## Özellikler
 - Kullanıcı kaydı ve JWT tabanlı giriş
 - Rol ayrımı olan organizasyon/şirket yapısı (owner, member)
 - Organizasyon kapsamlı doküman erişimi ve sorgu izolasyonu
