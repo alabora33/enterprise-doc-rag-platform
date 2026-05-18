@@ -30,7 +30,14 @@ export default function LoginPage() {
       });
 
       localStorage.setItem("access_token", response.data.access_token);
-      navigate("/dashboard");
+
+      const userResponse = await axiosClient.get("/users/me");
+
+      if (userResponse.data.is_superuser) {
+        navigate("/admin/usage");
+      } else {
+        navigate("/dashboard");
+      }
     } catch (err) {
       setError(t("login.invalidCredentials"));
     } finally {
