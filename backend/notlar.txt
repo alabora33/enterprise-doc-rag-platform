@@ -3298,3 +3298,175 @@ db.commit() — tek transaction (session + 2 mesaj + kaynaklar)
 ========================================================
 
 
+========================================================
+CELERY ENTEGRASYONU — NEDEN VE NE DEĞİŞTİ?
+========================================================
+
+## NEDEN CELERY EKLENDİ?
+
+Bir kullanıcı PDF/DOCX/XLSX yüklediğinde arka planda 3 ağır
+iş gerçekleşir:
+  1. Dosya parse edilir (pypdf, python-docx, openpyxl)
+  2. İçerik chunk'lara bölünür (1200 karakter, 200 overlap)
+  3. Her chunk için Gemini API'ye embedding isteği atılır
+     (network çağrısı, en yavaş adım)
+
+Bu 3 adım senkron (yani HTTP isteği beklerken) yapılsaydı:
+  - API yanıtı 30–120 saniye sürebilir
+  - Kullanıcı tarayıcıda donmuş ekran görür
+  - Büyük dosyada HTTP timeout hatası alınır
+  - Birden fazla kullanıcı aynı anda yüklerse sunucu çöker
+
+Celery ile bu iş yükü arka plan kuyruğuna atılır.
+Kullanıcı anında yanıt alır, iş arka planda tamamlanır.
+
+========================================================
+EKLENİP/DEĞİŞTİRİLEN DOSYALAR
+========================================================
+
+## YENİ DOSYALAR
+
+### backend/app/workers/celery_app.py
+  - Celery uygulamasını oluşturur ve yapılandırır.
+  - broker=REDIS_URL  : Redis, görevlerin mesaj kuyruğu
+  - backend=REDIS_URL : Görev sonuçları da Redis'te saklanır
+  - task_serializer="json": Görevler JSON formatında iletilir
+  - timezone="Europe/Istanbul": Log'larda doğru saat görünür
+  - autodiscover_tasks(["app.workers.tasks"]): tasks.py'daki
+    tüm görevleri otomatik keşfeder
+
+### backend/app/workers/tasks.py
+  - Celery'nin çalıştıracağı görev fonksiyonlarını içerir.
+  - process_document_task(document_id: int):
+      1. Yeni bir DB session açar (SessionLocal)
+      2. document_processing_service.process_document() çağırır
+      3. Dönen document'ın id ve status'ünü dict olarak döner
+      4. finally bloğunda session her halükarda kapatılır
+  - SessionLocal doğrudan kullanılır çünkü Celery worker'ı
+    FastAPI'nin Depends() mekanizmasının dışındadır.
+    Her worker kendi session'ını kendisi yönetir.
+
+## DEĞİŞTİRİLEN DOSYALAR
+
+### backend/app/api/v1/documents.py — /upload endpoint'i
+  ÖNCESİ (senkron):
+    document = create_document_record(...)
+    process_document(db, document.id)  ← burada beklerdi
+    return document
+
+  SONRASI (asenkron):
+    document = create_document_record(...)
+    process_document_task.delay(document.id)  ← kuyruğa atar
+    return document  ← anında döner
+
+  .delay() metodu görevi Redis kuyruğuna ekler ve hemen döner.
+  Kullanıcı status="uploaded" olan document'ı saniyeler içinde
+  alır, arka planda işlem devam eder.
+
+### backend/app/services/document_processing_service.py
+  (bu servis zaten vardı, Celery'nin çağırdığı yer)
+  Akış içi sorumluluklar:
+    1. Document status → "processing" yap, commit et
+    2. parse_document() → dosyayı section listesine çevir
+       (TXT, PDF sayfa sayfa, DOCX tüm paragraflar, XLSX sheet'ler)
+    3. create_chunks_from_sections() → 1200 char chunk'lara böl
+       (200 char overlap: bağlam kopmasın diye)
+    4. create_embeddings() → Gemini API batch çağrısı
+       (tüm chunk'ları tek seferde gönderir, verimli)
+    5. Eski chunk'ları sil (yeniden işleme güvenliği)
+    6. Yeni DocumentChunk kayıtlarını DB'ye ekle
+       (content + embedding[1536 boyut] + metadata)
+    7. Document status → "completed" yap, commit et
+    8. Hata olursa rollback + status → "failed"
+
+### docker-compose.yml
+  YENİ SERVIS eklendi: celery_worker
+    - Backend ile aynı image'dan build edilir
+    - Farklı komutla başlar:
+      celery -A app.workers.celery_app.celery_app worker --loglevel=info
+    - Backend ile aynı .env ve volume'leri paylaşır
+      (uploads klasörüne erişmesi gerekir, dosyayı o okur)
+    - depends_on: postgres + redis
+      (DB'ye yazar, Redis'ten iş alır)
+
+========================================================
+ŞU ANKİ SİSTEM DURUMU — TAMAMLANAN MODÜLLER
+========================================================
+
+✅ Kullanıcı kayıt / giriş (JWT tabanlı)
+✅ Organizasyon yapısı (user ↔ organization ilişkisi)
+✅ Dosya yükleme (PDF, DOCX, XLSX, TXT)
+✅ Doküman işleme pipeline'ı (arka planda, Celery ile)
+   - Parse → Chunk → Embedding → PostgreSQL'e kayıt
+✅ Embedding storage (pgvector, Vector(1536))
+✅ Doküman listeleme ve chunk görüntüleme endpoint'leri
+✅ Docker ortamı (backend + celery_worker + postgres + redis)
+✅ Alembic migration sistemi
+
+🔲 Semantic search (benzer chunk bulma — endpoint var mı?)
+🔲 RAG pipeline (soru → embedding → chunk → LLM → cevap)
+🔲 Chat geçmişi (model var, servis var, endpoint eksik?)
+🔲 Frontend
+
+========================================================
+KULLANICI AÇISINDAN GÜNCEL AKIŞ
+========================================================
+
+1. KAYIT / GİRİŞ
+   POST /api/v1/auth/register  → kullanıcı oluşturulur
+   POST /api/v1/auth/login     → JWT token döner
+
+2. DOKÜMAN YÜKLEME
+   POST /api/v1/documents/upload  (Bearer token gerekli)
+   → Dosya /uploads/ klasörüne UUID isimli kaydedilir
+   → documents tablosuna kayıt eklenir (status: "uploaded")
+   → Celery kuyruğuna process_document_task görevi atılır
+   → Kullanıcıya anında document bilgisi döner
+
+3. ARKA PLANDA (kullanıcı beklemez)
+   Celery worker görevi alır →
+     - status: "processing"
+     - Dosya parse edilir (sayfa/sheet/paragraf bazlı)
+     - 1200 char chunk'lara bölünür (200 char overlap)
+     - Gemini API ile embedding üretilir (1536 boyut)
+     - document_chunks tablosuna kaydedilir
+     - status: "completed"
+   Hata olursa → status: "failed"
+
+4. DOKÜMAN SORGULAMA
+   GET /api/v1/documents          → organizasyondaki tüm dokümanlar
+   GET /api/v1/documents/{id}     → tek doküman (status kontrolü)
+   GET /api/v1/documents/{id}/chunks → chunk listesi (embedding dahil)
+
+5. SONRAKİ ADIM (henüz tamamlanmadı)
+   POST /api/v1/search  → kullanıcı sorusu gelir
+     → soru embedding'e çevrilir
+     → pgvector cosine similarity ile en yakın chunk'lar bulunur
+     → LLM'e (Gemini) "context + soru" gönderilir
+     → kaynaklı cevap döner
+
+========================================================
+TEKNİK NOTLAR
+========================================================
+
+- Celery worker neden ayrı container?
+  Ağır iş yükü (embedding API çağrıları) backend ile aynı
+  process'te çalışsaydı FastAPI'nin event loop'u bloklanırdı.
+  Ayrı container = ayrı process = backend her zaman responsive.
+
+- Neden Redis hem broker hem backend?
+  Broker : görev mesajını taşır (producer → queue → consumer)
+  Backend: görev sonucunu saklar (status takibi için)
+  Tek Redis yeterli, production'da ayırılabilir.
+
+- .delay() vs .apply_async()
+  .delay(arg) → basit kullanım, sadece argüman geçer
+  .apply_async(args, countdown=10, retry=True) → gelişmiş
+  Şu an .delay() yeterli, retry/countdown sonra eklenebilir.
+
+- Chunk overlap neden var?
+  1200 char'lık kesimde cümle ortasından kesilirse anlam
+  kaybolabilir. 200 char overlap ile her chunk bir öncekiyle
+  örtüşür, LLM daha tutarlı bağlam alır.
+
+========================================================

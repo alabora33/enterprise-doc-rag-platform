@@ -31,6 +31,8 @@ def process_document(
         chunks = create_chunks_from_sections(
             sections=sections,
         )
+        if not chunks:
+            raise ValueError("No text content could be extracted from the document.")
 
         chunk_texts = [
             chunk["content"]

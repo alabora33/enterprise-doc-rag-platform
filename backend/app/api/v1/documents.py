@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 from app.schemas.document_chunk import DocumentChunkRead
 from app.models.document_chunk import DocumentChunk
-from app.services.document_processing_service import process_document
+from app.workers.tasks import process_document_task
 from app.api.v1.users import get_current_user
 from app.db.session import get_db
 from app.schemas.document import DocumentRead
@@ -61,12 +61,9 @@ def upload_document(
             upload_file=file,
         )
 
-        processed_document = process_document(
-            db=db,
-            document_id=document.id,
-        )
+        process_document_task.delay(document.id)
 
-        return processed_document
+        return document
 
     except ValueError as exc:
         raise HTTPException(

@@ -12,6 +12,21 @@ services:
       - redis
     volumes:
       - ./backend/app:/app/app
+      - ./backend/uploads:/app/uploads
+      
+  celery_worker:
+    build:
+      context: ./backend
+    container_name: enterprise_rag_celery_worker
+    command: celery -A app.workers.celery_app.celery_app worker --loglevel=info
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/uploads:/app/uploads
 
   postgres:
     image: pgvector/pgvector:pg16
