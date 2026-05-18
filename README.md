@@ -1,11 +1,11 @@
 # Enterprise Document RAG Platform
 
-> �🇸 [English](#english) | 🇹🇷 [Türkçe](#türkçe)
+> EN [English](#english) | TR [Türkçe](#türkçe)
 
 ---
 
 <a name="english"></a>
-# �🇸 English
+# EN English
 
 A full-stack, multi-tenant AI-powered document intelligence platform. Upload internal corporate documents, ask source-grounded questions, and get answers backed by real document chunks — with full chat history, organization isolation, and admin monitoring.
 
@@ -235,7 +235,7 @@ curl http://localhost:8000/health
 ---
 
 <a name="türkçe"></a>
-# 🇹🇷 Türkçe
+# TR Türkçe
 
 Kurumsal şirket içi dokümanları yükleyip, bu dokümanlara kaynak göstererek soru sormanızı sağlayan tam yığın, çok kiracılı (multi-tenant), yapay zeka destekli bir doküman zekâ platformu. Tam sohbet geçmişi, organizasyon bazlı veri izolasyonu ve admin izleme özellikleriyle birlikte gelir.
 
