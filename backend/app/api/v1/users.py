@@ -66,3 +66,14 @@ def read_current_user(
     current_user=Depends(get_current_user),
 ):
     return current_user
+
+def get_current_superuser(
+    current_user=Depends(get_current_user),
+):
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The user does not have enough privileges.",
+        )
+
+    return current_user

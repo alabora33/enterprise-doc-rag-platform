@@ -15,6 +15,8 @@ from app.services.chat_history_service import (
 )
 from app.services.rag_service import answer_question_with_rag
 
+from app.models.usage import UsageAction
+from app.services.usage_service import create_usage_log
 
 router = APIRouter(
     prefix="/chat",
@@ -86,13 +88,17 @@ def chat_with_documents(
         sources=rag_result["sources"],
     )
 
-    db.commit()
+    create_usage_log(
+        db=db,
+        action=UsageAction.RAG_CHAT,
+        organization_id=organization_id,
+        user_id=current_user.id,
+        resource_type="chat_session",
+        resource_id=chat_session.id,
+        detail=f"Question: {chat_request.question}",
+    )
 
-    return {
-        "session_id": chat_session.id,
-        "answer": rag_result["answer"],
-        "sources": rag_result["sources"],
-    }
+    db.commit()
 
 
 @router.get(

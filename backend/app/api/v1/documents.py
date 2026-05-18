@@ -13,6 +13,8 @@ from app.services.document_service import (
 )
 from app.services.organization_service import get_user_organizations
 
+from app.models.usage import UsageAction
+from app.services.usage_service import create_usage_log
 
 router = APIRouter(
     prefix="/documents",
@@ -62,6 +64,18 @@ def upload_document(
         )
 
         process_document_task.delay(document.id)
+        create_usage_log(
+            db=db,
+            action=UsageAction.DOCUMENT_UPLOAD,
+            organization_id=organization_id,
+            user_id=current_user.id,
+            resource_type="document",
+            resource_id=document.id,
+            detail=f"Uploaded file: {document.original_file_name}",
+        )
+
+        db.commit()
+        db.refresh(document)
 
         return document
 
@@ -70,6 +84,7 @@ def upload_document(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
 
 @router.get(
     "",
@@ -216,5 +231,18 @@ def retry_document_processing(
     db.refresh(document)
 
     process_document_task.delay(document.id)
+
+    create_usage_log(
+        db=db,
+        action=UsageAction.DOCUMENT_RETRY,
+        organization_id=organization_id,
+        user_id=current_user.id,
+        resource_type="document",
+        resource_id=document.id,
+        detail=f"Retried processing for file: {document.original_file_name}",
+    )
+
+    db.commit()
+    db.refresh(document)
 
     return document
